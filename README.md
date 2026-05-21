@@ -1,4 +1,6 @@
-# Election/Coordination Protocol (RAFT)
+# DynamoDB Simulation built on top of
+## Election/Coordination Protocol (RAFT)
+## Gossip Heartbeat Membership Protocol
 
 ## Miriam Brunet, Charles Moreno, Toby Mui
 
