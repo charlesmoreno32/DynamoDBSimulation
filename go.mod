@@ -1,3 +1,3 @@
-module CSC569lab3
+module DynamoDBSimulation
 
 go 1.26.1

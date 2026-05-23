@@ -262,11 +262,10 @@ func (req *Requests) Listen(ID int, reply *Membership) error {
 }
 
 func CombineTables(primary *Membership, other *Membership) *Membership {
-    //TODO
+    other.mu.Lock()   // ← lock other before reading it
+    defer other.mu.Unlock()
 
     original := NewMembership()
-
-    //Duplicate primary
     for ID, node := range primary.Members {
         original.Members[ID] = node
     }
@@ -274,24 +273,22 @@ func CombineTables(primary *Membership, other *Membership) *Membership {
 
     for ID, nodeO := range other.Members {
         nodeP, exists := primary.Members[ID]
-        if exists { //if node exists in primary
+        if exists {
             if nodeP.Hbcounter < nodeO.Hbcounter {
                 nodeP.Hbcounter = nodeO.Hbcounter
                 nodeP.Alive = true
                 nodeP.Time = currTime
                 primary.Members[ID] = nodeP
             }
-        } else { //Need to add new node
-            //Need to change before assignment since go maps can't be modified
-            nodeO.Time = float64(time.Now().Unix()) // Time converted from time.Time to float
+        } else {
+            nodeO.Time = currTime
             primary.Members[ID] = nodeO
         }
     }
 
-    // Check if heartbeat has increased from original
     for ID, nodeN := range primary.Members {
         nodeO, exists := original.Members[ID]
-        if exists {     //If node was just inserted, assume alive
+        if exists {
             if (nodeN.Hbcounter == nodeO.Hbcounter) &&
                 ((currTime - nodeO.Time) >= Z_TIME_MIN) {
                 nodeN.Alive = false
@@ -300,4 +297,74 @@ func CombineTables(primary *Membership, other *Membership) *Membership {
         }
     }
     return primary
+}
+
+type LogMessage struct {
+    ToNodeID    int
+    Index       int
+    Term        int
+    Command     string
+    CommitIndex int
+    PrevIndex   int
+    PrevTerm    int
+    LeaderID    int
+}
+
+type Log struct {
+    Mailbox     map[int][]LogMessage // slice per node so nothing gets overwritten
+    Entries     []LogMessage
+    CommitIndex int
+    mu          sync.Mutex
+}
+
+func NewLog() *Log {
+    return &Log{
+        Mailbox: make(map[int][]LogMessage),
+        Entries: []LogMessage{},
+    }
+}
+
+func (l *Log) Send(msg LogMessage, reply *bool) error {
+    l.mu.Lock()
+    l.Mailbox[msg.ToNodeID] = append(l.Mailbox[msg.ToNodeID], msg)
+    l.mu.Unlock()
+    *reply = true
+    return nil
+}
+
+// returns all pending messages for this node and clears the slot
+func (l *Log) Listen(nodeID int, reply *[]LogMessage) error {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    msgs, exists := l.Mailbox[nodeID]
+    if !exists || len(msgs) == 0 {
+        return errors.New("no mail")
+    }
+    *reply = msgs
+    l.Mailbox[nodeID] = []LogMessage{} // clear after reading
+    return nil
+}
+
+func (l *Log) AppendEntries(msg LogMessage, reply *bool) error {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+
+    if msg.PrevIndex > 0 && len(l.Entries) > 0 {
+        if msg.PrevIndex > len(l.Entries) ||
+            l.Entries[msg.PrevIndex-1].Term != msg.PrevTerm {
+            *reply = false
+            return errors.New("log mismatch at PrevIndex")
+        }
+    }
+
+    if msg.Index > len(l.Entries) {
+        l.Entries = append(l.Entries, msg)
+    }
+
+    if msg.CommitIndex > l.CommitIndex {
+        l.CommitIndex = msg.CommitIndex
+    }
+
+    *reply = true
+    return nil
 }

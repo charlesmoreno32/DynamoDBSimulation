@@ -1,7 +1,7 @@
 package main
 
 import (
-	"CSC569lab3/shared"
+	"DynamoDBSimulation/shared"
 	"io"
 	"net/http"
 	"net/rpc"
@@ -13,11 +13,13 @@ func main() {
         nodes := shared.NewMembership()
         requests := shared.NewRequests()
 		proposals := shared.NewProposal()
+        raftLog := shared.NewLog()
         // register nodes with `rpc.DefaultServer`
         rpc.Register(&leader)
         rpc.Register(nodes)
         rpc.Register(requests)
 		rpc.Register(proposals)
+        rpc.Register(raftLog)
 
         // register an HTTP handler for RPC communication
         rpc.HandleHTTP()

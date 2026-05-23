@@ -1,7 +1,7 @@
 package main
 
 import (
-	"CSC569lab3/shared"
+	"DynamoDBSimulation/shared"
 	"fmt"
 	"math/rand"
 	"net/rpc"
@@ -23,11 +23,15 @@ var mu_lmemb sync.Mutex
 
 // Send the current membership table to a neighboring node with the provided ID
 func sendMessage(server *rpc.Client, id int, membership shared.Membership) {
-    //TODO
-    //Send uses Add to add a reqeust to the server
+    safe := shared.NewMembership()
+    mu_lmemb.Lock() // ← hold lock while copying
+    for k, v := range membership.Members {
+        safe.Members[k] = v
+    }
+    mu_lmemb.Unlock()
     success := true
-    req := shared.Request{ID:id, Table:membership} //Creates new id for that node with updated membership
-    (*server).Call("Requests.Add", req, &success)
+    req := shared.Request{ID: id, Table: *safe}
+    server.Call("Requests.Add", req, &success)
 }
 
 // Read incoming messages from other nodes
@@ -70,6 +74,69 @@ func calcTime() float64 {
 }
 
 var wg = &sync.WaitGroup{}
+
+func sendLogEntries(server *rpc.Client, command string, log *shared.Log) {
+    // append to leader log first so index is stable
+    newIndex := len(log.Entries) + 1
+    prevIndex, prevTerm := 0, 0
+    if len(log.Entries) > 0 {
+        prev      := log.Entries[len(log.Entries)-1]
+        prevIndex  = prev.Index
+        prevTerm   = prev.Term
+    }
+
+    entry := shared.LogMessage{
+        Index:       newIndex,
+        Term:        self_node.Term,
+        Command:     command,
+        CommitIndex: newIndex - 1, // commit previous entry
+        PrevIndex:   prevIndex,
+        PrevTerm:    prevTerm,
+        LeaderID:    self_node.ID,
+    }
+    log.Entries = append(log.Entries, entry) // leader appends first
+
+    // then fan out to followers with the same stable index
+    for i := 1; i <= MAX_NODES; i++ {
+        if i == self_node.ID { continue }
+        msg := entry
+        msg.ToNodeID = i
+        ok := false
+        server.Call("Log.Send", msg, &ok)
+    }
+}
+
+func processLogMailbox(server *rpc.Client, localLog *shared.Log) {
+    var msgs []shared.LogMessage
+    if err := server.Call("Log.Listen", self_node.ID, &msgs); err != nil {
+        return
+    }
+    for _, msg := range msgs {
+        ok := false
+        localLog.AppendEntries(msg, &ok)
+    }
+}
+
+func printLog(log *shared.Log, leaderID int) {
+    if leaderID > 0 {
+        fmt.Printf("--- Log (leader=%d, commitIndex=%d) ---\n", leaderID, log.CommitIndex)
+    } else {
+        fmt.Printf("--- Log (no leader, commitIndex=%d) ---\n", log.CommitIndex)
+    }
+    if len(log.Entries) == 0 {
+        fmt.Println("  (empty)")
+    }
+    for _, msg := range log.Entries {
+        committed := ""
+        if msg.Index <= log.CommitIndex {
+            committed = " [committed]"
+        }
+        fmt.Printf("  [%d] term=%d leader=%d cmd=%s%s\n", msg.Index, msg.Term, msg.LeaderID, msg.Command, committed)
+
+    }
+    fmt.Println("")
+    time.AfterFunc(time.Second*10, func() { printLog(log, self_node.LeaderID) })
+}
 
 func main() {
         rand.Seed(time.Now().UnixNano())
@@ -127,15 +194,18 @@ func main() {
 
         // crashTime := self_node.CrashTime()
 
-        time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, &membership, id) })
-        time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, &membership, id) })
+        var localLog = shared.NewLog()
+
+        time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, &membership, id, localLog) })
+        time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, &membership, id, localLog) })
 //        time.AfterFunc(time.Second*time.Duration(Z_TIME), func() { runAfterZ(server, id) })
+        time.AfterFunc(time.Second*5, func() { printLog(localLog, self_node.LeaderID) })
 
         wg.Add(1)
         wg.Wait()
 }
 
-func runAfterX(server *rpc.Client, node *shared.Node, membership **shared.Membership, id int) {
+func runAfterX(server *rpc.Client, node *shared.Node, membership **shared.Membership, id int, log *shared.Log) {
     //TODO
     // HB counter increases
     //server.Call(Node.Update??Hbcounter++)
@@ -148,7 +218,11 @@ func runAfterX(server *rpc.Client, node *shared.Node, membership **shared.Member
 
         updateLeader(server, node) //check for new leader information
 
-        time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, membership, id) })
+        if self_node.Role == shared.ROLE_LEADER {
+            sendLogEntries(server, fmt.Sprintf("hb-%d", node.Hbcounter), log)
+        }
+
+        time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, membership, id, log) })
     }
 }
 
@@ -225,7 +299,7 @@ func enterElection(server *rpc.Client) {
     }
 }
 
-func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Membership, id int) {
+func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Membership, id int, log *shared.Log) {
     //TODO
     // Send membership to neighbors
     if self_node.Alive {
@@ -235,7 +309,7 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
             (*membership) = readMessages(server, self_node.LeaderID, **membership)
             mu_lmemb.Unlock()
             // Do I need to check if the leader has recently updated for X time before reading the messages
-
+            processLogMailbox(server, log)
             // RAFT Election: If no heartbeat from leader for Z_TIME, mark leader as dead and start election
             node, exists := (*membership).Members[self_node.LeaderID]
             if exists && !node.Alive {
@@ -265,7 +339,7 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
         printMembership(**membership)
         mu_lmemb.Unlock()
 
-        time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, membership, id) })
+        time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, membership, id, log) })
     }
 }
 
