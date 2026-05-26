@@ -15,6 +15,8 @@ const (
     ROLE_FOLLOWER  =  0
     ROLE_CANDIDATE =  1
     ROLE_LEADER    =  2
+    N_REPLICAS      = 3
+    VNODES_PER_NODE = 3
 )
 
 // Node struct represents a computing node.
@@ -366,5 +368,148 @@ func (l *Log) AppendEntries(msg LogMessage, reply *bool) error {
     }
 
     *reply = true
+    return nil
+}
+
+// ******************** - Dynamo -******************************** /
+
+type VNode struct {
+    Token  int
+    NodeID int
+}
+
+type DynamoRing struct {
+    VNodes []VNode
+    mu     sync.Mutex
+}
+
+func NewDynamoRing() *DynamoRing {
+    return &DynamoRing{VNodes: []VNode{}}
+}
+
+func (r *DynamoRing) Join(nodeID int, reply *bool) error {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    for i := 0; i < VNODES_PER_NODE; i++ {
+        token := (nodeID*VNODES_PER_NODE + i) % (MAX_NODES * VNODES_PER_NODE)
+        r.VNodes = append(r.VNodes, VNode{Token: token, NodeID: nodeID})
+    }
+    for i := 1; i < len(r.VNodes); i++ {
+        for j := i; j > 0 && r.VNodes[j].Token < r.VNodes[j-1].Token; j-- {
+            r.VNodes[j], r.VNodes[j-1] = r.VNodes[j-1], r.VNodes[j]
+        }
+    }
+    *reply = true
+    return nil
+}
+
+func HashKey(key string) int {
+    h := 0
+    for _, c := range key {
+        h = (h*31 + int(c)) % (MAX_NODES * VNODES_PER_NODE)
+    }
+    return h
+}
+
+// GetReplicas returns N distinct physical nodes clockwise from key
+func (r *DynamoRing) GetReplicas(key string, reply *[]int) error {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    if len(r.VNodes) == 0 {
+        return errors.New("ring is empty")
+    }
+    token := HashKey(key)
+    start := 0
+    for i, vn := range r.VNodes {
+        if vn.Token >= token {
+            start = i
+            break
+        }
+    }
+    seen := map[int]bool{}
+    result := []int{}
+    for i := 0; i < len(r.VNodes) && len(result) < N_REPLICAS; i++ {
+        vn := r.VNodes[(start+i)%len(r.VNodes)]
+        if !seen[vn.NodeID] {
+            seen[vn.NodeID] = true
+            result = append(result, vn.NodeID)
+        }
+    }
+    *reply = result
+    return nil
+}
+
+func (r *DynamoRing) PrintRing() {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    fmt.Println("--- DynamoRing ---")
+    for _, vn := range r.VNodes {
+        fmt.Printf("  token=%-4d → node %d\n", vn.Token, vn.NodeID)
+    }
+}
+
+func (r *DynamoRing) GetVNodes(unused int, reply *[]VNode) error {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    *reply = r.VNodes
+    return nil
+}
+
+/*--------------*/
+
+type KVMessage struct {
+    ToNodeID int
+    Key      string
+    Value    string
+    ReqID    int
+}
+
+type KVStore struct {
+    Data    map[int]map[string]string // nodeID → key → value
+    Mailbox map[int][]KVMessage
+    mu      sync.Mutex
+}
+
+func NewKVStore() *KVStore {
+    return &KVStore{
+        Data:    make(map[int]map[string]string),
+        Mailbox: make(map[int][]KVMessage),
+    }
+}
+
+func (kv *KVStore) Put(msg KVMessage, reply *bool) error {
+    kv.mu.Lock()
+    if kv.Data[msg.ToNodeID] == nil {
+        kv.Data[msg.ToNodeID] = make(map[string]string)
+    }
+    kv.Data[msg.ToNodeID][msg.Key] = msg.Value
+    kv.mu.Unlock()
+    *reply = true
+    return nil
+}
+
+func (kv *KVStore) Get(key string, reply *string) error {
+    kv.mu.Lock()
+    defer kv.mu.Unlock()
+    // search all nodes for the key
+    for _, store := range kv.Data {
+        if val, exists := store[key]; exists {
+            *reply = val
+            return nil
+        }
+    }
+    return errors.New("key not found: " + key)
+}
+
+func (kv *KVStore) GetStore(nodeID int, reply *map[string]string) error {
+    kv.mu.Lock()
+    defer kv.mu.Unlock()
+    result := make(map[string]string)
+    if store, exists := kv.Data[nodeID]; exists {
+        for k, v := range store {
+            result[k] = v
+        }
+    }
+    *reply = result
     return nil
 }

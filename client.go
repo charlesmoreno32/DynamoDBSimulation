@@ -117,7 +117,8 @@ func processLogMailbox(server *rpc.Client, localLog *shared.Log) {
     }
 }
 
-func printLog(log *shared.Log, leaderID int) {
+
+func printLog(log *shared.Log, leaderID int, server *rpc.Client) {
     if leaderID > 0 {
         fmt.Printf("--- Log (leader=%d, commitIndex=%d) ---\n", leaderID, log.CommitIndex)
     } else {
@@ -131,11 +132,32 @@ func printLog(log *shared.Log, leaderID int) {
         if msg.Index <= log.CommitIndex {
             committed = " [committed]"
         }
-        fmt.Printf("  [%d] term=%d leader=%d cmd=%s%s\n", msg.Index, msg.Term, msg.LeaderID, msg.Command, committed)
+        fmt.Printf("  [%d] term=%d leader=%d cmd=%s%s\n",
+            msg.Index, msg.Term, msg.LeaderID, msg.Command, committed)
+    }
 
+    // print the ring
+    var vnodes []shared.VNode
+    if err := server.Call("DynamoRing.GetVNodes", 0, &vnodes); err == nil {
+        fmt.Println("--- DynamoRing ---")
+        for _, vn := range vnodes {
+            fmt.Printf("  token=%-4d → node %d\n", vn.Token, vn.NodeID)
+        }
+    }
+
+    // print this node's kv store
+    var store map[string]string
+    if err := server.Call("KVStore.GetStore", self_node.ID, &store); err == nil {
+        fmt.Printf("--- KV Store (node=%d) ---\n", self_node.ID)
+        if len(store) == 0 {
+            fmt.Println("  (empty)")
+        }
+        for k, v := range store {
+            fmt.Printf("  '%s' = '%s'\n", k, v)
+        }
     }
     fmt.Println("")
-    time.AfterFunc(time.Second*10, func() { printLog(log, self_node.LeaderID) })
+    time.AfterFunc(time.Second*10, func() { printLog(log, self_node.LeaderID, server) })
 }
 
 func main() {
@@ -190,6 +212,8 @@ func main() {
         membership := shared.NewMembership()
         membership.Add(self_node, &self_node)
 
+        joinRing(server)
+
         sendMessage(server, id, *membership)
 
         // crashTime := self_node.CrashTime()
@@ -198,8 +222,8 @@ func main() {
 
         time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, &membership, id, localLog) })
         time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, &membership, id, localLog) })
-//        time.AfterFunc(time.Second*time.Duration(Z_TIME), func() { runAfterZ(server, id) })
-        time.AfterFunc(time.Second*5, func() { printLog(localLog, self_node.LeaderID) })
+//        time.AfterFunc(time.Second*time.Duration(Z_TIME), func() { runAfterZ(server, id) })   
+        time.AfterFunc(time.Second*5, func() { printLog(localLog, self_node.LeaderID, server) })
 
         wg.Add(1)
         wg.Wait()
@@ -299,6 +323,64 @@ func enterElection(server *rpc.Client) {
     }
 }
 
+func joinRing(server *rpc.Client) {
+    ok := false
+    server.Call("DynamoRing.Join", self_node.ID, &ok)
+    fmt.Printf("Node %d joined the ring\n", self_node.ID)
+}
+
+// only the leader calls this
+func kvPut(server *rpc.Client, key, value string) {
+    if self_node.Role != shared.ROLE_LEADER {
+        fmt.Println("kvPut: not the leader")
+        return
+    }
+    var replicas []int
+    if err := server.Call("DynamoRing.GetReplicas", key, &replicas); err != nil {
+        fmt.Println("GetReplicas error:", err)
+        return
+    }
+    for _, nodeID := range replicas {
+        msg := shared.KVMessage{ToNodeID: nodeID, Key: key, Value: value, ReqID: self_node.ID}
+        ok := false
+        server.Call("KVStore.Send", msg, &ok)
+    }
+    fmt.Printf("Put '%s'='%s' → replicas %v\n", key, value, replicas)
+}
+
+// kvGet reads from the first replica's store directly
+func kvGet(server *rpc.Client, key string) {
+    var replicas []int
+    if err := server.Call("DynamoRing.GetReplicas", key, &replicas); err != nil {
+        fmt.Println("GetReplicas error:", err)
+        return
+    }
+    // try each replica until we find the key
+    for _, nodeID := range replicas {
+        var store map[string]string
+        if err := server.Call("KVStore.GetStore", nodeID, &store); err == nil {
+            if val, exists := store[key]; exists {
+                fmt.Printf("Get '%s' = '%s' (from node %d)\n", key, val, nodeID)
+                return
+            }
+        }
+    }
+    fmt.Printf("Get '%s': not found in replicas %v yet\n", key, replicas)
+}
+
+// every node drains its mailbox each Y tick
+func processKVMailbox(server *rpc.Client) {
+    var msgs []shared.KVMessage
+    if err := server.Call("KVStore.Listen", self_node.ID, &msgs); err != nil {
+        return
+    }
+    for _, msg := range msgs {
+        ok := false
+        server.Call("KVStore.Put", msg, &ok)
+        fmt.Printf("KV stored: '%s'='%s'\n", msg.Key, msg.Value)
+    }
+}
+
 func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Membership, id int, log *shared.Log) {
     //TODO
     // Send membership to neighbors
@@ -334,6 +416,19 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
                 }
             }
         }
+        
+        processKVMailbox(server)
+
+        if self_node.Role == shared.ROLE_LEADER {
+            if self_node.Hbcounter == 5 {
+                kvPut(server, "course", "CSC569")
+                kvPut(server, "project", "DynamoDB")
+                kvGet(server, "course")
+            } else if self_node.Hbcounter == 10 {
+                kvPut(server, "course", "CSC599")
+                kvGet(server, "course")
+            }
+        }
 
         mu_lmemb.Lock()
         printMembership(**membership)
@@ -362,12 +457,14 @@ func printMembership(m shared.Membership) {
     } else {
         fmt.Println("NO LEADER!")
     }
+    // caller already holds mu_lmemb, just iterate directly
     for _, val := range m.Members {
         status := "is Alive"
         if !val.Alive {
             status = "is Dead"
         }
-        fmt.Printf("Node %d has hb %d, time %.1f and %s\n", val.ID, val.Hbcounter, val.Time, status)
+        fmt.Printf("Node %d has hb %d, time %.1f and %s\n",
+            val.ID, val.Hbcounter, val.Time, status)
     }
     fmt.Println("")
 }

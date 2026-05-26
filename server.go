@@ -14,12 +14,16 @@ func main() {
         requests := shared.NewRequests()
 		proposals := shared.NewProposal()
         raftLog := shared.NewLog()
+        kvStore   := shared.NewKVStore()
+        dynRing   := shared.NewDynamoRing()
         // register nodes with `rpc.DefaultServer`
         rpc.Register(&leader)
         rpc.Register(nodes)
         rpc.Register(requests)
 		rpc.Register(proposals)
         rpc.Register(raftLog)
+        rpc.Register(kvStore)
+        rpc.Register(dynRing)
 
         // register an HTTP handler for RPC communication
         rpc.HandleHTTP()
