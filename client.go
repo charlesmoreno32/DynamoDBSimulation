@@ -330,7 +330,7 @@ func joinRing(server *rpc.Client) {
 }
 
 // only the leader calls this
-func kvPut(server *rpc.Client, key, value string) {
+func put(server *rpc.Client, key int, value string) {
     if self_node.Role != shared.ROLE_LEADER {
         fmt.Println("kvPut: not the leader")
         return
@@ -348,28 +348,21 @@ func kvPut(server *rpc.Client, key, value string) {
     fmt.Printf("Put '%s'='%s' → replicas %v\n", key, value, replicas)
 }
 
-// kvGet reads from the first replica's store directly
-func kvGet(server *rpc.Client, key string) {
-    var replicas []int
-    if err := server.Call("DynamoRing.GetReplicas", key, &replicas); err != nil {
-        fmt.Println("GetReplicas error:", err)
-        return
-    }
-    // try each replica until we find the key
-    for _, nodeID := range replicas {
-        var store map[string]string
-        if err := server.Call("KVStore.GetStore", nodeID, &store); err == nil {
-            if val, exists := store[key]; exists {
-                fmt.Printf("Get '%s' = '%s' (from node %d)\n", key, val, nodeID)
-                return
-            }
-        }
-    }
-    fmt.Printf("Get '%s': not found in replicas %v yet\n", key, replicas)
+//fetch data from node
+func get(server *rpc.Client, key int) {
+    // master gets key and checks preferenceList for key
+    // (preferenceList stores replica list for key ranges
+
+    nodeN := getPrefNode(key);
+    data = getDataNode(n int, key); //sends message to node n in mailbox
+                                    //waits for n to respond
+                                    // returns result
+    return data;
 }
 
+
 // every node drains its mailbox each Y tick
-func processKVMailbox(server *rpc.Client) {
+func processMailbox(server *rpc.Client) {
     var msgs []shared.KVMessage
     if err := server.Call("KVStore.Listen", self_node.ID, &msgs); err != nil {
         return
