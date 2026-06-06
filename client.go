@@ -335,7 +335,7 @@ func printRing(server *rpc.Client) {
 	for _, vnode := range vnodes {
 		fmt.Printf("VNode @ %d: Node %d\n", vnode.Location, vnode.NodeID)
 	}
-	test_keys := []int{1, 100000, 1000000000, 1050000000, 110000000, 120000000, 140000000, 180000000, 200000000, 220000000}
+	test_keys := []int{1, 100000, 1000000000, 1050000000, 1100000000, 1200000000, 1400000000, 1800000000, 2000000000, 2200000000}
 
         preferenceList := [shared.N_REPLICAS]int{}
 	for _, key := range test_keys {
@@ -343,7 +343,7 @@ func printRing(server *rpc.Client) {
 		if err != nil {
 			fmt.Println("Error getting Preference List: ", err)
 		}
-		fmt.Printf("Key %d: ", key)
+		fmt.Printf("Key %10d: ", key)
 		fmt.Print(preferenceList)
 		fmt.Println()
 	}
