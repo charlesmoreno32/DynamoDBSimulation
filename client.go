@@ -343,7 +343,9 @@ func printRing(server *rpc.Client) {
 		if err != nil {
 			fmt.Println("Error getting Preference List: ", err)
 		}
-		fmt.Println(preferenceList)
+		fmt.Printf("Key %d: ", key)
+		fmt.Print(preferenceList)
+		fmt.Println()
 	}
 	
 }
