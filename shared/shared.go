@@ -380,15 +380,6 @@ type VNode struct {
     NodeID 	 int
 	Location int
 }
-
-func (r *DynamoRing) GetVNodes(unused int, reply *[]VNode) error {
-    r.mu.Lock()
-	//TODO
-	
-    r.mu.Unlock()
-    return nil
-}
-
 /*************************************************
  ****************** DYNAMO RING ******************
  *************************************************/
@@ -414,14 +405,22 @@ func (r *DynamoRing) containsLoc(location int) bool {
 	return false
 }
 
-func (r *DynamoRing) Join(node Node, reply *bool) error {
+
+func (r *DynamoRing) GetVNodes(fetch bool, reply *[]VNode) error {
+	r.mu.Lock()
+	*reply = r.VNodes
+	r.mu.Unlock()
+    return nil
+}
+
+func (r *DynamoRing) Join(nodeID int, reply *bool) error {
     r.mu.Lock() 
 	//TODO
 	// Choose random location on ring.
 	for i := 0; i < VNODES_PER_NODE; i++ {
 		location := int(r.Rng.Uint32())
 		if !r.containsLoc(location) {
-			vNode := VNode{node.ID, location}
+			vNode := VNode{nodeID, location}
 			r.VNodes = append(r.VNodes, vNode)
 		} else {
 			i--
@@ -510,18 +509,9 @@ func (r *DynamoRing) GetPreferenceList(key int, reply *[N_REPLICAS]int) error {
 			}
 		}
 	}
+	*reply = preferenceList
     r.mu.Unlock()
 	return nil
-}
-
-func (r *DynamoRing) PrintRing(print bool, reply *bool) error {
-    r.mu.Lock()
-	for _, vnode := range r.VNodes {
-		fmt.Printf("VNode @ %d: Node %d\n", vnode.Location, vnode.NodeID)
-	}
-    r.mu.Unlock()
-    *reply = true
-    return nil
 }
 
 func (r *DynamoRing) getReplicaNodes(newNode VNode) [N_REPLICAS]int {
