@@ -137,8 +137,7 @@ func printLog(log *shared.Log, leaderID int, server *rpc.Client) {
     }
 
     // print the ring
-    printed := false
-    server.Call("DynamoRing.PrintRing", true, &printed)
+    printRing(server)
 
     /*// print this node's kv store
     var store map[string]string
@@ -321,8 +320,21 @@ func enterElection(server *rpc.Client) {
 
 func joinRing(server *rpc.Client) {
     ok := false
-    server.Call("DynamoRing.Join", self_node.ID, &ok)
+    err := server.Call("DynamoRing.Join", self_node.ID, &ok)
+	if err != nil {
+		fmt.Println("Error joining ring: ", err)
+	}
     fmt.Printf("Node %d joined the ring\n", self_node.ID)
+}
+func printRing(server *rpc.Client) {
+	vnodes := []shared.VNode{}
+	err := server.Call("DynamoRing.GetVNodes", true, &vnodes)
+	if err != nil {
+		fmt.Println("Error getting nodes: ", err)
+	}
+	for _, vnode := range vnodes {
+		fmt.Printf("VNode @ %d: Node %d\n", vnode.Location, vnode.NodeID)
+	}
 }
 
 // only the leader calls this
