@@ -337,7 +337,7 @@ func printRing(server *rpc.Client) {
 	}
 	test_keys := []int{1, 100000, 1000000000, 1050000000, 110000000, 120000000, 140000000, 180000000, 200000000, 220000000}
 
-	preferenceList = [shared.N_REPLICAS]int{}
+        preferenceList := [shared.N_REPLICAS]int{}
 	for _, key := range test_keys {
 		err := server.Call("DynamoRing.GetPreferenceList", key, &preferenceList)
 		if err != nil {
