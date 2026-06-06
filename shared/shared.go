@@ -9,6 +9,7 @@ import (
 	"time"
 	"crypto/md5"
 	"sort"
+        "encoding/binary"
 )
 
 const (
@@ -405,7 +406,7 @@ func NewDynamoRing() *DynamoRing {
 }
 
 func (r *DynamoRing) containsLoc(location int) bool {
-	for _, vnode := r.VNodes {
+	for _, vnode := range r.VNodes {
 		if vnode.Location == location {
 			return true
 		}
@@ -513,16 +514,18 @@ func (r *DynamoRing) GetPreferenceList(key int, reply *[N_REPLICAS]int) error {
 	return nil
 }
 
-func (r *DynamoRing) PrintRing() {
+func (r *DynamoRing) PrintRing(print bool, reply *bool) error {
     r.mu.Lock()
-	for _, vnode := r.VNodes {
+	for _, vnode := range r.VNodes {
 		fmt.Printf("VNode @ %d: Node %d\n", vnode.Location, vnode.NodeID)
 	}
     r.mu.Unlock()
+    *reply = true
+    return nil
 }
 
 func (r *DynamoRing) getReplicaNodes(newNode VNode) [N_REPLICAS]int {
-	
+    return [N_REPLICAS]int{1, 1}
 }
 
 
@@ -567,7 +570,7 @@ func (db *DBMessages) Listen(selfID int, reply *DBMessage) error {
 		return errors.New("No messages to process")
 	}
 	message := db.Pending[selfID][0] //Fetch top message
-	db.Pending[selfID] := db.Pending[selfID][1:] //Remove top message
+	db.Pending[selfID] = db.Pending[selfID][1:] //Remove top message
 	db.mu.Unlock()
 	*reply = message
 	return nil

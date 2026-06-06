@@ -137,15 +137,10 @@ func printLog(log *shared.Log, leaderID int, server *rpc.Client) {
     }
 
     // print the ring
-    var vnodes []shared.VNode
-    if err := server.Call("DynamoRing.GetVNodes", 0, &vnodes); err == nil {
-        fmt.Println("--- DynamoRing ---")
-        for _, vn := range vnodes {
-            fmt.Printf("  token=%-4d → node %d\n", vn.Token, vn.NodeID)
-        }
-    }
+    printed := false
+    server.Call("DynamoRing.PrintRing", true, &printed)
 
-    // print this node's kv store
+    /*// print this node's kv store
     var store map[string]string
     if err := server.Call("KVStore.GetStore", self_node.ID, &store); err == nil {
         fmt.Printf("--- KV Store (node=%d) ---\n", self_node.ID)
@@ -156,6 +151,7 @@ func printLog(log *shared.Log, leaderID int, server *rpc.Client) {
             fmt.Printf("  '%s' = '%s'\n", k, v)
         }
     }
+    */
     fmt.Println("")
     time.AfterFunc(time.Second*10, func() { printLog(log, self_node.LeaderID, server) })
 }
@@ -273,7 +269,7 @@ func enterElection(server *rpc.Client) {
         fmt.Printf("Error - updateLeader: %s\n", err)
     }
 
-    if (proposal == shared.Node{}) { //No proposals yet. Proposes self as candidate
+    if (proposal.ID == 0) { //No proposals yet. Proposes self as candidate
         fmt.Println("No Proposals, proposing self as leader")
         (*server).Call("Proposal.Enqueue", self_node, &self_node)
         self_node.Role = shared.ROLE_CANDIDATE
@@ -331,21 +327,8 @@ func joinRing(server *rpc.Client) {
 
 // only the leader calls this
 func put(server *rpc.Client, key int, value string) {
-    if self_node.Role != shared.ROLE_LEADER {
-        fmt.Println("kvPut: not the leader")
-        return
-    }
-    var replicas []int
-    if err := server.Call("DynamoRing.GetReplicas", key, &replicas); err != nil {
-        fmt.Println("GetReplicas error:", err)
-        return
-    }
-    for _, nodeID := range replicas {
-        msg := shared.KVMessage{ToNodeID: nodeID, Key: key, Value: value, ReqID: self_node.ID}
-        ok := false
-        server.Call("KVStore.Send", msg, &ok)
-    }
-    fmt.Printf("Put '%s'='%s' → replicas %v\n", key, value, replicas)
+    //Should get preference list and add value to each part of 
+    // preference list
 }
 
 //fetch data from node
@@ -353,17 +336,17 @@ func get(server *rpc.Client, key int) {
     // master gets key and checks preferenceList for key
     // (preferenceList stores replica list for key ranges
 
-    nodeN := getPrefNode(key);
-    data = getDataNode(n int, key); //sends message to node n in mailbox
+    //nodeN := getPrefNode(key);
+    //data = getDataNode(n, key); //sends message to node n in mailbox
                                     //waits for n to respond
                                     // returns result
-    return data;
+    //return data;
 }
 
 
 // every node drains its mailbox each Y tick
 func processMailbox(server *rpc.Client) {
-    var msgs []shared.KVMessage
+    /*var msgs []shared.Message
     if err := server.Call("KVStore.Listen", self_node.ID, &msgs); err != nil {
         return
     }
@@ -372,6 +355,7 @@ func processMailbox(server *rpc.Client) {
         server.Call("KVStore.Put", msg, &ok)
         fmt.Printf("KV stored: '%s'='%s'\n", msg.Key, msg.Value)
     }
+    */
 }
 
 func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Membership, id int, log *shared.Log) {
@@ -410,16 +394,16 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
             }
         }
         
-        processKVMailbox(server)
+        //processKVMailbox(server)
 
         if self_node.Role == shared.ROLE_LEADER {
             if self_node.Hbcounter == 5 {
-                kvPut(server, "course", "CSC569")
-                kvPut(server, "project", "DynamoDB")
-                kvGet(server, "course")
+        //        kvPut(server, "course", "CSC569")
+        //        kvPut(server, "project", "DynamoDB")
+        //        kvGet(server, "course")
             } else if self_node.Hbcounter == 10 {
-                kvPut(server, "course", "CSC599")
-                kvGet(server, "course")
+        //        kvPut(server, "course", "CSC599")
+        //        kvGet(server, "course")
             }
         }
 
