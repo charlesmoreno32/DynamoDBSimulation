@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 	"crypto/md5"
+	"sort"
 )
 
 const (
@@ -16,11 +17,12 @@ const (
     ROLE_FOLLOWER   =  0
     ROLE_CANDIDATE  =  1
     ROLE_LEADER     =  2
-    N_REPLICAS      =  3
+    N_REPLICAS      =  2
     VNODES_PER_NODE =  3
 	FLAG_PUT        =  0
 	FLAG_FETCH      =  1
 	FLAG_RESPONSE   =  2
+	RING_SIZE       = 4294967295 //Max Uint32 cast to int
 )
 
 /***********************************************
@@ -32,9 +34,10 @@ type Store struct {
 
 func NewStore() *Store {
     return &Store{
-        Data:    make(map[int]string)
+        Data:    make(map[int]string),
 	}
 }
+
 
 func (st *Store) Put(key int, data string, reply *bool) error {
     st.Data[key] = data
@@ -390,39 +393,138 @@ func (r *DynamoRing) GetVNodes(unused int, reply *[]VNode) error {
  *************************************************/
 type DynamoRing struct {
     VNodes   []VNode
-	PrefList []Node
+	Rng      *rand.Rand
     mu       sync.Mutex
 }
 
 func NewDynamoRing() *DynamoRing {
     return &DynamoRing{
 		VNodes: []VNode{},
-		prefList: []Nodes{}}
+		Rng:    rand.New(rand.NewSource(99)), //Keep constant for now
+		}
 }
 
-func (r *DynamoRing) Join(nodeID int, reply *bool) error {
-    r.mu.Lock() //Needed? only if leader isn't coordinating this
+func (r *DynamoRing) containsLoc(location int) bool {
+	for _, vnode := r.VNodes {
+		if vnode.Location == location {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *DynamoRing) Join(node Node, reply *bool) error {
+    r.mu.Lock() 
 	//TODO
 	// Choose random location on ring.
+	for i := 0; i < VNODES_PER_NODE; i++ {
+		location := int(r.Rng.Uint32())
+		if !r.containsLoc(location) {
+			vNode := VNode{node.ID, location}
+			r.VNodes = append(r.VNodes, vNode)
+		} else {
+			i--
+		}
+	}
+
+	sort.Slice(r.VNodes, func(i, j int) bool {
+		return r.VNodes[i].Location < r.VNodes[j].Location
+	})
 	
-	// Create VNodes (distributed at constant interval?)
 	// Get replicas from needed nodes.
-	// update preference list
     r.mu.Unlock()
+	*reply = true
+	return nil
 }
 
-// GetReplicas returns data from 3 distinct physical nodes
+// What is this supposed to do? After a node is inserted, everyone needs to reshuffle.
+// Well, not everyone, but the three next nodes need to adjust their ranges. How do the 
+// physical nodes find out about this reshuffling? Nodes need method to delete chunks of
+// data from store and add chunks of data to store.
+// A -> B -> C -> D -> E -> F -> G
+// A stores (G, A], (F, G], and (E, F], B stores (A, B], etc.
+// X inserted between C and D
+// A -> B -> C -> X -> D -> E -> F -> G
+// A, B, C stay the same. 
+// D removes (A, B], keeps (B, C], and splits (C, D] into (C, X], (X, D]
+// E removes (B, C], splites former (C, D] into (C, X] and (X, D], and keeps (D, E]
+// F removes (C, X], formerly part of its (C, D] range, but keeps (X, D], (D, E], and (E, F]
+// X needs to add ranges (A, B], (B, C], and (C, X] - very conviniently the ranges D, E, and F 
+// are getting rid of. Need functions for add, delete range of keys, or not delete, but send range
+// and remove from self store. And it needs to translate to real nodes from vnodes. But that shouldn't
+// be too bad
 func (r *DynamoRing) GetReplicas(key string, reply *[]int) error {
     r.mu.Lock()
 	//TODO
     r.mu.Unlock()
+	return nil
+}
+ 
+func (r *DynamoRing) GetPreferenceList(key int, reply *[N_REPLICAS]int) error {
+    r.mu.Lock()
+	var nodeList [N_REPLICAS]VNode
+	var preferenceList [N_REPLICAS]int
+	for i := range preferenceList {
+        preferenceList[i] = -1
+    }
+	
+	i := 0;
+	for _, vNode := range r.VNodes {
+		if vNode.Location >= key {
+			contained := false
+			for n := 0; n < i; n++ {
+				if (nodeList[n].NodeID == vNode.NodeID) {
+					contained = true //not distinct physical node
+					break
+				}
+			}
+			if !contained {
+				nodeList[i] = vNode
+				preferenceList[i] = vNode.NodeID
+				i++
+				if i == N_REPLICAS {
+					break;
+				}
+			}
+		}
+	}
+	if i != N_REPLICAS {
+		for _, vNode := range r.VNodes {
+			if vNode.Location < key {
+				contained := false
+				for n := 0; n < i; n++ {
+					if (nodeList[n].NodeID == vNode.NodeID) {
+						contained = true //not distinct physical node
+						break
+					}
+				}
+				if !contained {
+					nodeList[i] = vNode
+					preferenceList[i] = vNode.NodeID
+					i++
+					if i == N_REPLICAS {
+						break;
+					}
+				}
+			}
+		}
+	}
+    r.mu.Unlock()
+	return nil
 }
 
 func (r *DynamoRing) PrintRing() {
     r.mu.Lock()
-	//TODO
+	for _, vnode := r.VNodes {
+		fmt.Printf("VNode @ %d: Node %d\n", vnode.Location, vnode.NodeID)
+	}
     r.mu.Unlock()
 }
+
+func (r *DynamoRing) getReplicaNodes(newNode VNode) [N_REPLICAS]int {
+	
+}
+
 
 /************************************************
  *************** DATABASE MESSAGE ***************
@@ -514,7 +616,6 @@ func CombineTables(primary *Membership, other *Membership) *Membership {
 
 func hashData(data string) int {
     hash := md5.Sum([]byte(data))
-	var key int
-	key = binary.BigEndian.Uint32(hash[12:16])
+	key := int(binary.BigEndian.Uint32(hash[12:16]))
 	return key
 }
