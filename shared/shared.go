@@ -18,7 +18,7 @@ const (
     ROLE_FOLLOWER   =  0
     ROLE_CANDIDATE  =  1
     ROLE_LEADER     =  2
-    N_REPLICAS      =  2
+    N_REPLICAS      =  3
     VNODES_PER_NODE =  3
 	FLAG_PUT        =  0
 	FLAG_FETCH      =  1
