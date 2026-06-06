@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+	"crypto/md5"
 )
 
 const (
@@ -403,6 +404,7 @@ func (r *DynamoRing) Join(nodeID int, reply *bool) error {
     r.mu.Lock() //Needed? only if leader isn't coordinating this
 	//TODO
 	// Choose random location on ring.
+	
 	// Create VNodes (distributed at constant interval?)
 	// Get replicas from needed nodes.
 	// update preference list
@@ -510,7 +512,9 @@ func CombineTables(primary *Membership, other *Membership) *Membership {
     return primary
 }
 
-func HashData(data string) uint64 {
-    // TODO 
-	//use MD5 hash
+func hashData(data string) int {
+    hash := md5.Sum([]byte(data))
+	var key int
+	key = binary.BigEndian.Uint32(hash[12:16])
+	return key
 }
