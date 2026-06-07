@@ -20,6 +20,7 @@ const (
 )
 var self_node shared.Node
 var mu_lmemb sync.Mutex
+var kvCycle int // counts leader runAfterY cycles, to drive periodic kvPut
 
 // Send the current membership table to a neighboring node with the provided ID
 func sendMessage(server *rpc.Client, id int, membership shared.Membership) {
@@ -186,6 +187,7 @@ func main() {
         //leader currently starts as 1. Change later as needed.
         self_node = shared.Node{ID: id, Hbcounter: 0, Time: currTime, Alive: true, Term: 1,
                                 Role: shared.ROLE_FOLLOWER, LeaderID: 0, Voted: false}
+        self_node.Store = *shared.NewKVStore() // each node owns its local KV store
         if self_node.ID == 1 {
             self_node.Role = shared.ROLE_LEADER
             self_node.Term = 1
@@ -337,7 +339,7 @@ func printRing(server *rpc.Client) {
 	}
 	test_keys := []int{1, 100000, 1000000000, 1050000000, 1100000000, 1200000000, 1400000000, 1800000000, 2000000000, 2200000000}
 
-	preferenceList = [shared.N_REPLICAS]int{}
+	preferenceList := [shared.N_REPLICAS]int{}
 	for _, key := range test_keys {
 		err := server.Call("DynamoRing.GetPreferenceList", key, &preferenceList)
 		if err != nil {
@@ -350,37 +352,59 @@ func printRing(server *rpc.Client) {
 	
 }
 
-// only the leader calls this
-func put(server *rpc.Client, key int, value string) {
-    //Should get preference list and add value to each part of 
-    // preference list
-}
-
-//fetch data from node
-func get(server *rpc.Client, key int) {
-    // master gets key and checks preferenceList for key
-    // (preferenceList stores replica list for key ranges
-
-    //nodeN := getPrefNode(key);
-    //data = getDataNode(n, key); //sends message to node n in mailbox
-                                    //waits for n to respond
-                                    // returns result
-    //return data;
-}
-
-
-// every node drains its mailbox each Y tick
-func processMailbox(server *rpc.Client) {
-    /*var msgs []shared.Message
-    if err := server.Call("KVStore.Listen", self_node.ID, &msgs); err != nil {
+// only the leader calls this. Hash the key onto the ring, look up its
+// preference list, and send a PUT message to each replica's mailbox.
+func kvPut(server *rpc.Client, key string, value string) {
+    ringPos := shared.HashData(key)
+    var preferenceList [shared.N_REPLICAS]int
+    if err := server.Call("DynamoRing.GetPreferenceList", ringPos, &preferenceList); err != nil {
+        fmt.Println("kvPut: GetPreferenceList error:", err)
         return
     }
-    for _, msg := range msgs {
+    for _, nodeID := range preferenceList {
+        if nodeID == -1 {
+            continue // unfilled replica slot
+        }
+        msg := shared.DBMessage{ID: nodeID, Flag: shared.FLAG_PUT, Key: ringPos, Data: value}
         ok := false
-        server.Call("KVStore.Put", msg, &ok)
-        fmt.Printf("KV stored: '%s'='%s'\n", msg.Key, msg.Value)
+        if err := server.Call("DBMessages.Add", msg, &ok); err != nil {
+            fmt.Printf("kvPut: send to node %d error: %s\n", nodeID, err)
+        }
     }
-    */
+    fmt.Printf("kvPut: replicated '%s'='%s' (ring %d) to %v\n", key, value, ringPos, preferenceList)
+}
+
+// fetch data from a replica node.
+// TODO: requires a request/response round-trip over the mailbox. DBMessage
+// has no "from" field, so a FETCH can't be answered back to its sender yet.
+// Add a ToID/FromID to DBMessage and handle FLAG_FETCH/FLAG_RESPONSE in
+// processKVMailbox before implementing this.
+func kvGet(server *rpc.Client, key string) {
+    // ringPos := shared.HashData(key)
+    // GetPreferenceList -> send FLAG_FETCH to a live replica -> wait for the
+    // matching FLAG_RESPONSE (by TaskID) in our own mailbox -> return Data.
+}
+
+// every node drains its mailbox each Y tick and applies the messages to its
+// own local store. DBMessages.Listen returns one message at a time, so loop
+// until the mailbox is empty.
+func processKVMailbox(server *rpc.Client) {
+    for {
+        var msg shared.DBMessage
+        if err := server.Call("DBMessages.Listen", self_node.ID, &msg); err != nil {
+            return // "No messages to process" -> mailbox drained
+        }
+        switch msg.Flag {
+        case shared.FLAG_PUT:
+            ok := false
+            self_node.Store.Put(msg.Key, msg.Data, &ok)
+            fmt.Printf("node %d stored key %d = '%s'\n", self_node.ID, msg.Key, msg.Data)
+        case shared.FLAG_FETCH:
+            // TODO: read local store and reply with a FLAG_RESPONSE to sender
+        case shared.FLAG_RESPONSE:
+            // TODO: deliver to the waiting kvGet (match on TaskID)
+        }
+    }
 }
 
 func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Membership, id int, log *shared.Log) {
@@ -419,15 +443,13 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
             }
         }
         
-        //processKVMailbox(server)
+        processKVMailbox(server)
 
         if self_node.Role == shared.ROLE_LEADER {
-            if self_node.Hbcounter == 5 {
-        //        kvPut(server, "course", "CSC569")
-        //        kvPut(server, "project", "DynamoDB")
-        //        kvGet(server, "course")
-            } else if self_node.Hbcounter == 10 {
-        //        kvPut(server, "course", "CSC599")
+            kvCycle++
+            if kvCycle % 5 == 0 { // every 5 cycles (~10s) so puts keep scrolling by
+                kvPut(server, "course", "CSC569")
+                kvPut(server, "project", "DynamoDB")
         //        kvGet(server, "course")
             }
         }

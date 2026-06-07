@@ -2,6 +2,7 @@ package main
 
 import (
 	"DynamoDBSimulation/shared"
+	"fmt"
 	"io"
 	"net/http"
 	"net/rpc"
@@ -37,5 +38,8 @@ func main() {
         })
 
         // listen and serve default HTTP server
-        http.ListenAndServe("localhost:9005", nil)
+        fmt.Println("RPC server listening on localhost:9005")
+        if err := http.ListenAndServe("localhost:9005", nil); err != nil {
+                fmt.Println("server failed:", err)
+        }
 }

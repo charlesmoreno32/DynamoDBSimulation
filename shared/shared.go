@@ -39,7 +39,6 @@ func NewKVStore() *KVStore {
 	}
 }
 
-
 func (st *KVStore) Put(key int, data string, reply *bool) error {
     st.Data[key] = data
     return nil
@@ -607,7 +606,7 @@ func CombineTables(primary *Membership, other *Membership) *Membership {
     return primary
 }
 
-func hashData(data string) int {
+func HashData(data string) int {
     hash := md5.Sum([]byte(data))
 	key := int(binary.BigEndian.Uint32(hash[12:16]))
 	return key
