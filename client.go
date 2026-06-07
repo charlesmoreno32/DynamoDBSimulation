@@ -21,7 +21,7 @@ const (
 
 var self_node shared.Node
 var mu_lmemb sync.Mutex
-var kvCycle int // counts leader runAfterY cycles, to drive periodic kvPut
+var PutCycle int // counts leader runAfterY cycles, to drive periodic Put
 
 // Send the current membership table to a neighboring node with the provided ID
 func sendMessage(server *rpc.Client, id int, membership shared.Membership) {
@@ -142,10 +142,10 @@ func printLog(log *shared.Log, leaderID int, server *rpc.Client) {
 	// print the ring
 	printRing(server)
 
-	/*// print this node's kv store
+	/*// print this node's  store
 	  var store map[string]string
-	  if err := server.Call("KVStore.GetStore", self_node.ID, &store); err == nil {
-	      fmt.Printf("--- KV Store (node=%d) ---\n", self_node.ID)
+	  if err := server.Call("Store.GetStore", self_node.ID, &store); err == nil {
+	      fmt.Printf("---  Store (node=%d) ---\n", self_node.ID)
 	      if len(store) == 0 {
 	          fmt.Println("  (empty)")
 	      }
@@ -357,11 +357,11 @@ func printRing(server *rpc.Client) {
 
 // only the leader calls this. Hash the key onto the ring, look up its
 // preference list, and send a PUT message to each replica's mailbox.
-func kvPut(server *rpc.Client, key string, value string) {
+func Put(server *rpc.Client, key string, value string) {
 	ringPos := shared.HashData(key)
 	var preferenceList [shared.N_REPLICAS]int
 	if err := server.Call("DynamoRing.GetPreferenceList", ringPos, &preferenceList); err != nil {
-		fmt.Println("kvPut: GetPreferenceList error:", err)
+		fmt.Println("Put: GetPreferenceList error:", err)
 		return
 	}
 	for _, nodeID := range preferenceList {
@@ -371,18 +371,18 @@ func kvPut(server *rpc.Client, key string, value string) {
 		msg := shared.DBMessage{ToID: nodeID, FromID: self_node.ID, Flag: shared.FLAG_PUT, Key: ringPos, Data: value}
 		ok := false
 		if err := server.Call("DBMessages.Add", msg, &ok); err != nil {
-			fmt.Printf("kvPut: send to node %d error: %s\n", nodeID, err)
+			fmt.Printf("Put: send to node %d error: %s\n", nodeID, err)
 		}
 	}
-	fmt.Printf("kvPut: replicated '%s'='%s' (ring %d) to %v\n", key, value, ringPos, preferenceList)
+	fmt.Printf("Put: replicated '%s'='%s' (ring %d) to %v\n", key, value, ringPos, preferenceList)
 }
 
 // fetch data from a replica node.
-func kvGet(server *rpc.Client, key string) {
+func Get(server *rpc.Client, key string) {
 	ringPos := shared.HashData(key)
 	var preferenceList [shared.N_REPLICAS]int
 	if err := server.Call("DynamoRing.GetPreferenceList", ringPos, &preferenceList); err != nil {
-		fmt.Println("kvGet: GetPreferenceList error:", err)
+		fmt.Println("Get: GetPreferenceList error:", err)
 		return
 	}
 	for _, nodeID := range preferenceList {
@@ -392,10 +392,10 @@ func kvGet(server *rpc.Client, key string) {
 		msg := shared.DBMessage{ToID: nodeID, FromID: self_node.ID, Flag: shared.FLAG_FETCH, Key: ringPos}
 		ok := false
 		if err := server.Call("DBMessages.Add", msg, &ok); err != nil {
-			fmt.Printf("kvGet: send to node %d error: %s\n", nodeID, err)
+			fmt.Printf("Get: send to node %d error: %s\n", nodeID, err)
 		}
 	}
-	fmt.Printf("kvGet: sent fetch for key '%s' (ring %d) to %v\n", key, ringPos, preferenceList)
+	fmt.Printf("Get: sent fetch for key '%s' (ring %d) to %v\n", key, ringPos, preferenceList)
 }
 
 // every node drains its mailbox each Y tick and applies the messages to its
@@ -472,17 +472,13 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
 		processDBMailbox(server)
 
 		if self_node.Role == shared.ROLE_LEADER {
-			kvCycle++
-			if kvCycle%5 == 0 { // every 5 cycles (~10s) so puts keep scrolling by
-				kvPut(server, "course", "CSC569")
-				kvPut(server, "project", "DynamoDB")
-				kvGet(server, "course")
+			PutCycle++
+			if PutCycle%5 == 0 { // every 5 cycles (~10s) so puts keep scrolling by
+				Put(server, "course", "CSC569")
+				Put(server, "project", "DynamoDB")
+				Get(server, "course")
 			}
 		}
-
-		mu_lmemb.Lock()
-		// printMembership(**membership)
-		mu_lmemb.Unlock()
 
 		time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, membership, id, log) })
 	}
