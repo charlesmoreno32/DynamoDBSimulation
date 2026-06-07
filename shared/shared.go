@@ -9,7 +9,8 @@ import (
 	"time"
 	"crypto/md5"
 	"sort"
-        "encoding/binary"
+    "encoding/binary"
+	"slices"
 )
 
 const (
@@ -52,6 +53,19 @@ func (st *Store) Get(key int, reply *string) error {
 	} else {
 		return errors.New("Key " + fmt.Sprintf("%d", key) + " not found in database")
 	}
+}
+
+func (st *Store) FetchKeysInRange(beginning int, end int, remove bool) map[int]string {
+	removedKeys := make(map[int]string)
+	for key, data := range st.Data {
+		if key > beginning && key <= end {
+			removedKeys[key] = data //add key to list
+			if remove {
+				delete(st.Data, key)  //remove from store
+			}
+		}
+	}
+	return removedKeys
 }
 
 /************************************************
@@ -435,29 +449,6 @@ func (r *DynamoRing) Join(nodeID int, reply *bool) error {
 	*reply = true
 	return nil
 }
-
-// What is this supposed to do? After a node is inserted, everyone needs to reshuffle.
-// Well, not everyone, but the three next nodes need to adjust their ranges. How do the 
-// physical nodes find out about this reshuffling? Nodes need method to delete chunks of
-// data from store and add chunks of data to store.
-// A -> B -> C -> D -> E -> F -> G
-// A stores (G, A], (F, G], and (E, F], B stores (A, B], etc.
-// X inserted between C and D
-// A -> B -> C -> X -> D -> E -> F -> G
-// A, B, C stay the same. 
-// D removes (A, B], keeps (B, C], and splits (C, D] into (C, X], (X, D]
-// E removes (B, C], splites former (C, D] into (C, X] and (X, D], and keeps (D, E]
-// F removes (C, X], formerly part of its (C, D] range, but keeps (X, D], (D, E], and (E, F]
-// X needs to add ranges (A, B], (B, C], and (C, X] - very conviniently the ranges D, E, and F 
-// are getting rid of. Need functions for add, delete range of keys, or not delete, but send range
-// and remove from self store. And it needs to translate to real nodes from vnodes. But that shouldn't
-// be too bad
-func (r *DynamoRing) GetReplicas(key string, reply *[]int) error {
-    r.mu.Lock()
-	//TODO
-    r.mu.Unlock()
-	return nil
-}
  
 func (r *DynamoRing) GetPreferenceList(key int, reply *[N_REPLICAS]int) error {
     r.mu.Lock()
@@ -513,8 +504,70 @@ func (r *DynamoRing) GetPreferenceList(key int, reply *[N_REPLICAS]int) error {
 	return nil
 }
 
-func (r *DynamoRing) getReplicaNodes(newNode VNode) [N_REPLICAS]int {
-    return [N_REPLICAS]int{1, 1}
+func (r *DynamoRing) GetReplicaList(vnode VNode, reply *[N_REPLICAS]VNode) error {
+	r.mu.Lock()
+	var replicaList [N_REPLICAS]VNode
+	
+	idx := slices.Index(r.VNodes, vnode)
+	offset := 0 //variable for moving through list
+	
+	for i := 0; i < N_REPLICAS; i++ {
+		node := r.VNodes[(idx + i + offset) % len(r.VNodes)]
+	
+		if node == vnode {
+			break; //have gone over whole list
+		}
+		contained := false
+		for n := 0; n < i; n++ {
+			if (replicaList[n].NodeID == node.NodeID) {
+				contained = true //not distinct physical node
+				i-- //still haven't found a node to add
+				offset++ //Move to next node in list
+				break
+			}
+		}
+		if !contained {
+			replicaList[i] = node //Add node to list
+		}
+	}
+	*reply = replicaList
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *DynamoRing) GetPreviousList(vnode VNode, reply *[N_REPLICAS]VNode) error {
+   r.mu.Lock()
+	var previousList [N_REPLICAS]VNode
+	
+	idx := slices.Index(r.VNodes, vnode)
+	offset := 0 //variable for moving through list
+	
+	for i := 0; i < N_REPLICAS; i++ {
+		index := idx - i - offset
+		if index < 0 {
+			index = len(r.VNodes) + index
+		}
+		node := r.VNodes[index]
+	
+		if node == vnode {
+			break; //have gone over whole list
+		}
+		contained := false
+		for n := 0; n < i; n++ {
+			if (previousList[n].NodeID == node.NodeID) {
+				contained = true //not distinct physical node
+				i-- //still haven't found a node to add
+				offset-- //Move to next node in list
+				break
+			}
+		}
+		if !contained {
+			previousList[i] = node //Add node to list
+		}
+	}
+	*reply = previousList
+	r.mu.Unlock()
+	return nil
 }
 
 
@@ -565,6 +618,55 @@ func (db *DBMessages) Listen(selfID int, reply *DBMessage) error {
 	*reply = message
 	return nil
 }
+
+/************************************************
+ *************** DATABASE MESSAGE ***************
+ ************************************************/
+type KeySetMsg struct {
+	ToID   int
+    FromID int //From Node ID
+	Start  int //VNodes call function so stores/location can be returned
+	End    int
+	Flag   int //FETCH or RESPONSE
+	KeySet map[int]string //Key Sets
+}
+
+// Allow for multiple messages
+type KeySetMsgs struct {
+    Pending map[int][]KeySetMsg
+    mu    sync.Mutex
+}
+
+// Returns a new instance of a Membership (pointer).
+func NewKeySetMsgs() *KeySetMsgs {
+    return &KeySetMsgs{
+        Pending: make(map[int][]KeySetMsg),
+    }
+}
+
+// Adds a new ks message 
+func (ks *KeySetMsgs) Add(payload KeySetMsg, reply *bool) error {
+    ks.mu.Lock()
+    ks.Pending[payload.ToID] = append(ks.Pending[payload.ToID], payload) //Add to list
+    *reply = true 
+    ks.mu.Unlock()
+    return nil
+}
+
+// Listens to communication from 
+func (ks *KeySetMsgs) getFirstMsg(selfID int, reply *KeySetMsg) error {
+  	ks.mu.Lock()
+	if len(ks.Pending[selfID]) == 0 {
+		ks.mu.Unlock()
+		return errors.New("No messages to process")
+	}
+	message := ks.Pending[selfID][0] //Fetch top message
+	ks.Pending[selfID] = ks.Pending[selfID][1:] //Remove top message
+	ks.mu.Unlock()
+	*reply = message
+	return nil
+}
+
 
 /************************************************
  ******************* FUNCTIONS *******************
