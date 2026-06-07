@@ -23,6 +23,20 @@ var self_node shared.Node
 var mu_lmemb sync.Mutex
 var PutCycle int // counts leader runAfterY cycles, to drive periodic Put
 
+// Data for leader to get and put on the key ring
+var demoData = []struct{ Key, Value string }{
+	{"course", "CSC569"},
+	{"project", "DynamoDB"},
+	{"university", "CalPoly"},
+	{"language", "Go"},
+	{"topic", "ConsistentHashing"},
+	{"replicas", "3"},
+	{"student1", "Miriam"},
+	{"student2", "Charles"},
+	{"student3", "Toby"},
+	{"semester", "Spring2026"},
+}
+
 // Send the current membership table to a neighboring node with the provided ID
 func sendMessage(server *rpc.Client, id int, membership shared.Membership) {
 	safe := shared.NewMembership()
@@ -324,87 +338,65 @@ func enterElection(server *rpc.Client) {
 }
 
 func ReplicateData(server *rpc.Client) {
-    r.mu.Lock()
-	// From current node, figure out what it needs to replicate (i.e., X needs to replicate  C and B)
-	// In values, navigate back two (N_REPLICAS ) to figure out who it needs to replicat
-	// Get locations of nodes, then get preference lst for self location to find preceeding nodes who's
-	// range will be adjusted.
-	// Send a message to those three nodes (get Vnodes & send message to real node with self & needed locaiton
-	// i.e, first node on preference list removes third to second previous, second node on the list removes
-	// second to first previous and third node removes first previous to x
-	//Wait to receive messages, as messages arrive, st.copy to store maps.Copy(dst, src)
-
-	// And everything's updated
-	vnodes := []VNode{}
-	err := (*server).Call("Dynamo.GetVNodes", true, &vnodes)
+	// From current node, figure out what it needs to replicate (i.e., X needs to replicate C and B)
+	// Navigate back N_REPLICAS to figure out who it needs to replicate, then send fetch requests
+	// to the nodes whose ranges it now overlaps. Responses arrive asynchronously and are applied
+	// to the local store in processKSMailbox.
+	vnodes := []shared.VNode{}
+	err := server.Call("DynamoRing.GetVNodes", true, &vnodes)
 	if err != nil {
-		fmt.Println("Error - getVNodes: ", err)
+		fmt.Println("Error - GetVNodes: ", err)
 	}
 
 	for _, vnode := range vnodes {
 
-		if vnode.NodeID == self.ID { //For each vnode of new node
-	
-			previousList := [N_REPLICAS + 1]VNode{} //get preceeding
-			replicaList := [N_REPLICAS]VNode{} // and subsequent nodes
-			
-			err := (*server).Call("Dynamo.GetPreviousList", vnode, &previousList) //List of vnodes that are physically distinct
+		if vnode.NodeID == self_node.ID { //For each vnode of new node
+
+			var previousArr [shared.N_REPLICAS]shared.VNode //preceeding nodes
+			var replicaList [shared.N_REPLICAS]shared.VNode  //subsequent nodes
+
+			err := server.Call("DynamoRing.GetPreviousList", vnode, &previousArr) //List of vnodes that are physically distinct
 			if err != nil {
-				fmt.Println("Error - previousList: ", err)
+				fmt.Println("Error - GetPreviousList: ", err)
 			}
-			previousList[N_REPLICAS] = vnode
-				
-			err := (*server).Call("Dynamo.GetReplicaList", vnode, &replicaList)
+
+			err = server.Call("DynamoRing.GetReplicaList", vnode, &replicaList)
 			if err != nil {
-				fmt.Println("Error - previousList: ", err)
+				fmt.Println("Error - GetReplicaList: ", err)
 			}
+
+			// previousList = [oldest .. nearest, self]
+			previousList := append([]shared.VNode{}, previousArr[:]...)
+			previousList = append(previousList, vnode)
 
 			// Self node = x
 			// Current ring: A -> B -> C -> X -> D -> E -> F
 			// Previous nodes: C, B, A ... X
 			// Replica nodes: D, E, F
-		
+
 			for idx, r := range replicaList {
-				//keyset := make(map[int]string)
-				
-				iloc1 = N_REPLICAS - idx - 1 //Last in list
-				iloc2 = N_REPLICAS - idx - 2 //Second to last
+				iloc1 := shared.N_REPLICAS - idx - 1 //Last in list
+				iloc2 := shared.N_REPLICAS - idx - 2 //Second to last
 
-				loc1 = previousList[iloc1].Location
+				loc1 := previousList[iloc1].Location
 
-				if iloc2 < 0 {
-					loc2 = vnode.Location //If out of bounds previous node, get self node
-				} else {
+				loc2 := vnode.Location //If out of bounds previous node, get self node
+				if iloc2 >= 0 {
 					loc2 = previousList[iloc2].Location
 				}
-					
+
 				message := shared.KeySetMsg{
-					ToID: r.NodeID, 
-					FromID: vnode.NodeID, 
-					Start: loc1,
-					End: loc2,
-					Flag: FLAG_FETCH, 
+					ToID:   r.NodeID,
+					FromID: vnode.NodeID,
+					Start:  loc1,
+					End:    loc2,
+					Flag:   shared.FLAG_FETCH,
 					KeySet: nil}
 				reply := false
-				err = (*server).Call("KeySetMsgs.Add", message, &reply)
-			}
-			
-			numResp := 0
-			message := shared.KeySetMsg{}
-			for numResp < N_REPLICAS {
-				err := (*server).Call("KeySetMsgs.getFirstMsg", vnode.NodeID, &resp)
-				if err != nil {
-					time.Sleep(1 * time.Second) //Wait a heartbeat
-					continue
-				}
-				if resp.Flag == FLAG_RESPONSE {
-					maps.Copy(self_node.Store, Store, keySet)
-				}
+				server.Call("KeySetMsgs.Add", message, &reply)
 			}
 		}
 	}
-    r.mu.Unlock()
-	return nil
 }
 
 func joinRing(server *rpc.Client) {
@@ -413,7 +405,7 @@ func joinRing(server *rpc.Client) {
 	if err != nil {
 		fmt.Println("Error joining ring: ", err)
 	}
-	ReplicateData(self_node.ID, server)
+	ReplicateData(server)
 	fmt.Printf("Node %d joined the ring\n", self_node.ID)
 }
 func printRing(server *rpc.Client) {
@@ -425,17 +417,17 @@ func printRing(server *rpc.Client) {
 	for _, vnode := range vnodes {
 		fmt.Printf("VNode @ %d: Node %d\n", vnode.Location, vnode.NodeID)
 	}
-	test_keys := []int{1, 100000, 1000000000, 1050000000, 1100000000, 1200000000, 1400000000, 1800000000, 2000000000, 2200000000}
 
+	// Print where each real catalog key is on the ring and which 3 nodes own it
+	fmt.Println("--- Key -> ring position -> replica nodes ---")
 	preferenceList := [shared.N_REPLICAS]int{}
-	for _, key := range test_keys {
-		err := server.Call("DynamoRing.GetPreferenceList", key, &preferenceList)
+	for _, kv := range demoData {
+		ringPos := shared.HashData(kv.Key)
+		err := server.Call("DynamoRing.GetPreferenceList", ringPos, &preferenceList)
 		if err != nil {
 			fmt.Println("Error getting Preference List: ", err)
 		}
-		fmt.Printf("Key %10d: ", key)
-		fmt.Print(preferenceList)
-		fmt.Println()
+		fmt.Printf("  %-11s @ %10d -> %v\n", kv.Key, ringPos, preferenceList)
 	}
 
 }
@@ -519,19 +511,19 @@ func processDBMailbox(server *rpc.Client) {
 	}
 }
 
-processKSMailbox(server *rpc.Client) {
+func processKSMailbox(server *rpc.Client) {
 	message := shared.KeySetMsg{}
 	if (*server).Call("KeySetMsgs.getFirstMsg", self_node.ID, &message) == nil {
-		keyset = self_node.Store.FetchKeysInRange(message.Start, message.End, false) //Don't delete from store for now
-		messageR = shared.KeySetMsg{
-					ToID: message.FromID, 
-					FromID: self_node.ID, 
-					Start: -1, //Don't matter for response
-					End: -1, //Don't matter for response
-					Flag: FLAG_RESPONSE, 
-					KeySet: keyset} //keys in range
+		keyset := self_node.Store.FetchKeysInRange(message.Start, message.End, false) //Don't delete from store for now
+		messageR := shared.KeySetMsg{
+			ToID:   message.FromID,
+			FromID: self_node.ID,
+			Start:  -1, //Don't matter for response
+			End:    -1, //Don't matter for response
+			Flag:   shared.FLAG_RESPONSE,
+			KeySet: keyset} //keys in range
 		reply := false
-		(*server).Call("KeySetMsgs.Add", message, &reply)
+		(*server).Call("KeySetMsgs.Add", messageR, &reply)
 	}
 }
 
@@ -575,10 +567,22 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
 
 		if self_node.Role == shared.ROLE_LEADER {
 			PutCycle++
-			if PutCycle%5 == 0 { // every 5 cycles (~10s) so puts keep scrolling by
-				Put(server, "course", "CSC569")
-				Put(server, "project", "DynamoDB")
-				Get(server, "course")
+			// Simulating a put every 5 heartbeats
+			if PutCycle%5 == 0 { 
+				round := PutCycle / 5
+				if round == 1 {
+					// Put every key on the ring on first 5th heartbeat on the leader. 
+					for _, kv := range demoData {
+						Put(server, kv.Key, kv.Value)
+					}
+				}
+				// each cycle re-put one key and read back another (offset by half
+				// the catalog) so both the write and read paths keep scrolling and
+				// you see different keys hitting different nodes
+				put := demoData[round%len(demoData)]
+				get := demoData[(round+len(demoData)/2)%len(demoData)]
+				Put(server, put.Key, put.Value)
+				Get(server, get.Key)
 			}
 		}
 
