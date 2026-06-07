@@ -323,12 +323,97 @@ func enterElection(server *rpc.Client) {
 	}
 }
 
+func ReplicateData(server *rpc.Client) {
+    r.mu.Lock()
+	// From current node, figure out what it needs to replicate (i.e., X needs to replicate  C and B)
+	// In values, navigate back two (N_REPLICAS ) to figure out who it needs to replicat
+	// Get locations of nodes, then get preference lst for self location to find preceeding nodes who's
+	// range will be adjusted.
+	// Send a message to those three nodes (get Vnodes & send message to real node with self & needed locaiton
+	// i.e, first node on preference list removes third to second previous, second node on the list removes
+	// second to first previous and third node removes first previous to x
+	//Wait to receive messages, as messages arrive, st.copy to store maps.Copy(dst, src)
+
+	// And everything's updated
+	vnodes := []VNode{}
+	err := (*server).Call("Dynamo.GetVNodes", true, &vnodes)
+	if err != nil {
+		fmt.Println("Error - getVNodes: ", err)
+	}
+
+	for _, vnode := range vnodes {
+
+		if vnode.NodeID == self.ID { //For each vnode of new node
+	
+			previousList := [N_REPLICAS + 1]VNode{} //get preceeding
+			replicaList := [N_REPLICAS]VNode{} // and subsequent nodes
+			
+			err := (*server).Call("Dynamo.GetPreviousList", vnode, &previousList) //List of vnodes that are physically distinct
+			if err != nil {
+				fmt.Println("Error - previousList: ", err)
+			}
+			previousList[N_REPLICAS] = vnode
+				
+			err := (*server).Call("Dynamo.GetReplicaList", vnode, &replicaList)
+			if err != nil {
+				fmt.Println("Error - previousList: ", err)
+			}
+
+			// Self node = x
+			// Current ring: A -> B -> C -> X -> D -> E -> F
+			// Previous nodes: C, B, A ... X
+			// Replica nodes: D, E, F
+		
+			for idx, r := range replicaList {
+				//keyset := make(map[int]string)
+				
+				iloc1 = N_REPLICAS - idx - 1 //Last in list
+				iloc2 = N_REPLICAS - idx - 2 //Second to last
+
+				loc1 = previousList[iloc1].Location
+
+				if iloc2 < 0 {
+					loc2 = vnode.Location //If out of bounds previous node, get self node
+				} else {
+					loc2 = previousList[iloc2].Location
+				}
+					
+				message := shared.KeySetMsg{
+					ToID: r.NodeID, 
+					FromID: vnode.NodeID, 
+					Start: loc1,
+					End: loc2,
+					Flag: FLAG_FETCH, 
+					KeySet: nil}
+				reply := false
+				err = (*server).Call("KeySetMsgs.Add", message, &reply)
+			}
+			
+			numResp := 0
+			message := shared.KeySetMsg{}
+			for numResp < N_REPLICAS {
+				err := (*server).Call("KeySetMsgs.getFirstMsg", vnode.NodeID, &resp)
+				if err != nil {
+					time.Sleep(1 * time.Second) //Wait a heartbeat
+					continue
+				}
+				if resp.Flag == FLAG_RESPONSE {
+					maps.Copy(self_node.Store, Store, keySet)
+				}
+			}
+		}
+	}
+    r.mu.Unlock()
+	return nil
+}
+
 func joinRing(server *rpc.Client) {
 	ok := false
 	err := server.Call("DynamoRing.Join", self_node.ID, &ok)
 	if err != nil {
 		fmt.Println("Error joining ring: ", err)
 	}
+	ReplicateData(self_node.ID, server)
 	fmt.Printf("Node %d joined the ring\n", self_node.ID)
 }
 func printRing(server *rpc.Client) {
@@ -434,6 +519,22 @@ func processDBMailbox(server *rpc.Client) {
 	}
 }
 
+processKSMailbox(server *rpc.Client) {
+	message := shared.KeySetMsg{}
+	if (*server).Call("KeySetMsgs.getFirstMsg", self_node.ID, &message) == nil {
+		keyset = self_node.Store.FetchKeysInRange(message.Start, message.End, false) //Don't delete from store for now
+		messageR = shared.KeySetMsg{
+					ToID: message.FromID, 
+					FromID: self_node.ID, 
+					Start: -1, //Don't matter for response
+					End: -1, //Don't matter for response
+					Flag: FLAG_RESPONSE, 
+					KeySet: keyset} //keys in range
+		reply := false
+		(*server).Call("KeySetMsgs.Add", message, &reply)
+	}
+}
+
 func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Membership, id int, log *shared.Log) {
 	//TODO
 	// Send membership to neighbors
@@ -470,6 +571,7 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
 		}
 
 		processDBMailbox(server)
+		processKSMailbox(server)
 
 		if self_node.Role == shared.ROLE_LEADER {
 			PutCycle++
