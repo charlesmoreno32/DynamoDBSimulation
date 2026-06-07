@@ -4,7 +4,7 @@
 
 ## Miriam Brunet, Charles Moreno, Toby Mui
 
-To run:
+----------To run manually:----------
 
 On the first terminal:
 
@@ -15,3 +15,7 @@ For the rest:
 go run client.go [node_id]
 
 this was built with a MAX_NODE count of 8 in mind
+
+
+----------To run with script----------
+./tmux-launch.sh
