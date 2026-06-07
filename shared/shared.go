@@ -522,8 +522,9 @@ func (r *DynamoRing) getReplicaNodes(newNode VNode) [N_REPLICAS]int {
  *************** DATABASE MESSAGE ***************
  ************************************************/
 type DBMessage struct {
-	ID     int //From Node ID
-    Flag   int  //PUT, FETCH, or RESPONSE
+	ToID     int //Destination Node ID
+    FromID int //From Node ID
+    Flag   int //PUT, FETCH, or RESPONSE
     Key    int
     Data   string
     TaskID int //FETCH & RESPONSE have same ID
@@ -545,7 +546,7 @@ func NewDBMessages() *DBMessages {
 // Adds a new database message to leader's inbox (or if leader, to followers' boxes)
 func (db *DBMessages) Add(payload DBMessage, reply *bool) error {
     db.mu.Lock()
-    db.Pending[payload.ID] = append(db.Pending[payload.ID], payload) //Add to list
+    db.Pending[payload.ToID] = append(db.Pending[payload.ToID], payload) //Add to list
     *reply = true 
     db.mu.Unlock()
     return nil
