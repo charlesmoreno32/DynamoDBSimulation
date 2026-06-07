@@ -29,22 +29,22 @@ const (
 /***********************************************
  ******************** STORE ********************
  ***********************************************/
-type KVStore struct {
+type Store struct {
     Data    map[int]string // key → value
 }
 
-func NewKVStore() *KVStore {
-    return &KVStore{
+func NewStore() *Store {
+    return &Store{
         Data:    make(map[int]string),
 	}
 }
 
-func (st *KVStore) Put(key int, data string, reply *bool) error {
+func (st *Store) Put(key int, data string, reply *bool) error {
     st.Data[key] = data
     return nil
 }
 
-func (st *KVStore) Get(key int, reply *string) error {
+func (st *Store) Get(key int, reply *string) error {
     data, exists := st.Data[key]
 	if exists {
 		*reply = data
@@ -67,7 +67,7 @@ type Node struct {
     Role      int //Could be enum type or constants
     LeaderID  int
     Voted     bool
-	Store     KVStore
+    Store     Store
 }
 
 // Generate random crash time from 10-60 seconds

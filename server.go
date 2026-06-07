@@ -17,7 +17,7 @@ func main() {
         raftLog := shared.NewLog()
         ring   := shared.NewDynamoRing()
         db_messages := shared.NewDBMessages()
-        store := shared.NewKVStore()
+        store := shared.NewStore()
 
         // register nodes with `rpc.DefaultServer`
         rpc.Register(&leader)

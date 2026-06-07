@@ -189,7 +189,7 @@ func main() {
 	//leader currently starts as 1. Change later as needed.
 	self_node = shared.Node{ID: id, Hbcounter: 0, Time: currTime, Alive: true, Term: 1,
 		Role: shared.ROLE_FOLLOWER, LeaderID: 0, Voted: false}
-	self_node.Store = *shared.NewKVStore() // each node owns its local KV store
+	self_node.Store = *shared.NewStore() // each node owns its local store
 	if self_node.ID == 1 {
 		self_node.Role = shared.ROLE_LEADER
 		self_node.Term = 1
@@ -401,7 +401,7 @@ func kvGet(server *rpc.Client, key string) {
 // every node drains its mailbox each Y tick and applies the messages to its
 // own local store. DBMessages.Listen returns one message at a time, so loop
 // until the mailbox is empty.
-func processKVMailbox(server *rpc.Client) {
+func processDBMailbox(server *rpc.Client) {
 	for {
 		var msg shared.DBMessage
 		if err := server.Call("DBMessages.Listen", self_node.ID, &msg); err != nil {
@@ -469,7 +469,7 @@ func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Members
 			}
 		}
 
-		processKVMailbox(server)
+		processDBMailbox(server)
 
 		if self_node.Role == shared.ROLE_LEADER {
 			kvCycle++
