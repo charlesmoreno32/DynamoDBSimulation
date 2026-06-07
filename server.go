@@ -2,6 +2,7 @@ package main
 
 import (
 	"DynamoDBSimulation/shared"
+	"fmt"
 	"io"
 	"net/http"
 	"net/rpc"
@@ -15,6 +16,9 @@ func main() {
 		proposals := shared.NewProposal()
         raftLog := shared.NewLog()
         ring   := shared.NewDynamoRing()
+        db_messages := shared.NewDBMessages()
+        store := shared.NewKVStore()
+
         // register nodes with `rpc.DefaultServer`
         rpc.Register(&leader)
         rpc.Register(nodes)
@@ -22,6 +26,8 @@ func main() {
 		rpc.Register(proposals)
         rpc.Register(raftLog)
         rpc.Register(ring)
+        rpc.Register(db_messages)
+        rpc.Register(store)
 
         // register an HTTP handler for RPC communication
         rpc.HandleHTTP()
@@ -32,5 +38,8 @@ func main() {
         })
 
         // listen and serve default HTTP server
-        http.ListenAndServe("localhost:9005", nil)
+        fmt.Println("RPC server listening on localhost:9005")
+        if err := http.ListenAndServe("localhost:9005", nil); err != nil {
+                fmt.Println("server failed:", err)
+        }
 }

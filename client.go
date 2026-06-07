@@ -12,319 +12,324 @@ import (
 )
 
 const (
-        MAX_NODES  = 8 //Update as needed
-        X_TIME     = 1
-        Y_TIME     = 2
-        Z_TIME_MAX = 100
-        Z_TIME_MIN = 10
+	MAX_NODES  = 8 //Update as needed
+	X_TIME     = 1
+	Y_TIME     = 2
+	Z_TIME_MAX = 100
+	Z_TIME_MIN = 10
 )
+
 var self_node shared.Node
 var mu_lmemb sync.Mutex
+var kvCycle int // counts leader runAfterY cycles, to drive periodic kvPut
 
 // Send the current membership table to a neighboring node with the provided ID
 func sendMessage(server *rpc.Client, id int, membership shared.Membership) {
-    safe := shared.NewMembership()
-    mu_lmemb.Lock() // ← hold lock while copying
-    for k, v := range membership.Members {
-        safe.Members[k] = v
-    }
-    mu_lmemb.Unlock()
-    success := true
-    req := shared.Request{ID: id, Table: *safe}
-    server.Call("Requests.Add", req, &success)
+	safe := shared.NewMembership()
+	mu_lmemb.Lock() // ← hold lock while copying
+	for k, v := range membership.Members {
+		safe.Members[k] = v
+	}
+	mu_lmemb.Unlock()
+	success := true
+	req := shared.Request{ID: id, Table: *safe}
+	server.Call("Requests.Add", req, &success)
 }
 
 // Read incoming messages from other nodes
 func readMessages(server *rpc.Client, id int, membership shared.Membership) *shared.Membership {
-    //TODO
-    //read uses listen to update client from all pending requests on server
-    mem := shared.NewMembership() //Creates empty membership
-    err := (*server).Call("Requests.Listen", id, mem) //update membership of curr node with table of neighbor #id
-    if (err != nil) {
-        fmt.Println(err)
-    } else {
-        shared.CombineTables(&membership, mem)
-    }
-    return &membership
+	//TODO
+	//read uses listen to update client from all pending requests on server
+	mem := shared.NewMembership()                     //Creates empty membership
+	err := (*server).Call("Requests.Listen", id, mem) //update membership of curr node with table of neighbor #id
+	if err != nil {
+		fmt.Println(err)
+	} else {
+		shared.CombineTables(&membership, mem)
+	}
+	return &membership
 }
 
 func leaderAnnouncement(server *rpc.Client, node *shared.Node) {
-    if node.Role == shared.ROLE_LEADER {
-        (*server).Call("Node.SetLeader", *node, node)
-    } else {
-        fmt.Println("Cannot set self as leader")
-    }
+	if node.Role == shared.ROLE_LEADER {
+		(*server).Call("Node.SetLeader", *node, node)
+	} else {
+		fmt.Println("Cannot set self as leader")
+	}
 }
 
 func updateLeader(server *rpc.Client, node *shared.Node) {
-    LeaderID := node.LeaderID
-    err := (*server).Call("Node.GetLeader", *node, node)
-    if err != nil {
-        fmt.Printf("Error - updateLeader: %s\n", err)
-    }
-    if LeaderID != node.LeaderID {
-        fmt.Printf("Leader is now node %d\n", node.LeaderID)
-    }
+	LeaderID := node.LeaderID
+	err := (*server).Call("Node.GetLeader", *node, node)
+	if err != nil {
+		fmt.Printf("Error - updateLeader: %s\n", err)
+	}
+	if LeaderID != node.LeaderID {
+		fmt.Printf("Leader is now node %d\n", node.LeaderID)
+	}
 }
 
 func calcTime() float64 {
-    //TODO
-    // Gets current time
-    return float64(time.Now().Unix())
+	//TODO
+	// Gets current time
+	return float64(time.Now().Unix())
 }
 
 var wg = &sync.WaitGroup{}
 
 func sendLogEntries(server *rpc.Client, command string, log *shared.Log) {
-    // append to leader log first so index is stable
-    newIndex := len(log.Entries) + 1
-    prevIndex, prevTerm := 0, 0
-    if len(log.Entries) > 0 {
-        prev      := log.Entries[len(log.Entries)-1]
-        prevIndex  = prev.Index
-        prevTerm   = prev.Term
-    }
+	// append to leader log first so index is stable
+	newIndex := len(log.Entries) + 1
+	prevIndex, prevTerm := 0, 0
+	if len(log.Entries) > 0 {
+		prev := log.Entries[len(log.Entries)-1]
+		prevIndex = prev.Index
+		prevTerm = prev.Term
+	}
 
-    entry := shared.LogMessage{
-        Index:       newIndex,
-        Term:        self_node.Term,
-        Command:     command,
-        CommitIndex: newIndex - 1, // commit previous entry
-        PrevIndex:   prevIndex,
-        PrevTerm:    prevTerm,
-        LeaderID:    self_node.ID,
-    }
-    log.Entries = append(log.Entries, entry) // leader appends first
+	entry := shared.LogMessage{
+		Index:       newIndex,
+		Term:        self_node.Term,
+		Command:     command,
+		CommitIndex: newIndex - 1, // commit previous entry
+		PrevIndex:   prevIndex,
+		PrevTerm:    prevTerm,
+		LeaderID:    self_node.ID,
+	}
+	log.Entries = append(log.Entries, entry) // leader appends first
 
-    // then fan out to followers with the same stable index
-    for i := 1; i <= MAX_NODES; i++ {
-        if i == self_node.ID { continue }
-        msg := entry
-        msg.ToNodeID = i
-        ok := false
-        server.Call("Log.Send", msg, &ok)
-    }
+	// then fan out to followers with the same stable index
+	for i := 1; i <= MAX_NODES; i++ {
+		if i == self_node.ID {
+			continue
+		}
+		msg := entry
+		msg.ToNodeID = i
+		ok := false
+		server.Call("Log.Send", msg, &ok)
+	}
 }
 
 func processLogMailbox(server *rpc.Client, localLog *shared.Log) {
-    var msgs []shared.LogMessage
-    if err := server.Call("Log.Listen", self_node.ID, &msgs); err != nil {
-        return
-    }
-    for _, msg := range msgs {
-        ok := false
-        localLog.AppendEntries(msg, &ok)
-    }
+	var msgs []shared.LogMessage
+	if err := server.Call("Log.Listen", self_node.ID, &msgs); err != nil {
+		return
+	}
+	for _, msg := range msgs {
+		ok := false
+		localLog.AppendEntries(msg, &ok)
+	}
 }
 
-
 func printLog(log *shared.Log, leaderID int, server *rpc.Client) {
-    if leaderID > 0 {
-        fmt.Printf("--- Log (leader=%d, commitIndex=%d) ---\n", leaderID, log.CommitIndex)
-    } else {
-        fmt.Printf("--- Log (no leader, commitIndex=%d) ---\n", log.CommitIndex)
-    }
-    if len(log.Entries) == 0 {
-        fmt.Println("  (empty)")
-    }
-    for _, msg := range log.Entries {
-        committed := ""
-        if msg.Index <= log.CommitIndex {
-            committed = " [committed]"
-        }
-        fmt.Printf("  [%d] term=%d leader=%d cmd=%s%s\n",
-            msg.Index, msg.Term, msg.LeaderID, msg.Command, committed)
-    }
+	if leaderID > 0 {
+		fmt.Printf("--- Log (leader=%d, commitIndex=%d) ---\n", leaderID, log.CommitIndex)
+	} else {
+		fmt.Printf("--- Log (no leader, commitIndex=%d) ---\n", log.CommitIndex)
+	}
+	if len(log.Entries) == 0 {
+		fmt.Println("  (empty)")
+	}
+	for _, msg := range log.Entries {
+		committed := ""
+		if msg.Index <= log.CommitIndex {
+			committed = " [committed]"
+		}
+		fmt.Printf("  [%d] term=%d leader=%d cmd=%s%s\n",
+			msg.Index, msg.Term, msg.LeaderID, msg.Command, committed)
+	}
 
-    // print the ring
-    printRing(server)
+	// print the ring
+	printRing(server)
 
-    /*// print this node's kv store
-    var store map[string]string
-    if err := server.Call("KVStore.GetStore", self_node.ID, &store); err == nil {
-        fmt.Printf("--- KV Store (node=%d) ---\n", self_node.ID)
-        if len(store) == 0 {
-            fmt.Println("  (empty)")
-        }
-        for k, v := range store {
-            fmt.Printf("  '%s' = '%s'\n", k, v)
-        }
-    }
-    */
-    fmt.Println("")
-    time.AfterFunc(time.Second*10, func() { printLog(log, self_node.LeaderID, server) })
+	/*// print this node's kv store
+	  var store map[string]string
+	  if err := server.Call("KVStore.GetStore", self_node.ID, &store); err == nil {
+	      fmt.Printf("--- KV Store (node=%d) ---\n", self_node.ID)
+	      if len(store) == 0 {
+	          fmt.Println("  (empty)")
+	      }
+	      for k, v := range store {
+	          fmt.Printf("  '%s' = '%s'\n", k, v)
+	      }
+	  }
+	*/
+	fmt.Println("")
+	time.AfterFunc(time.Second*10, func() { printLog(log, self_node.LeaderID, server) })
 }
 
 func main() {
-        rand.Seed(time.Now().UnixNano())
-        Z_TIME := rand.Intn(Z_TIME_MAX - Z_TIME_MIN) + Z_TIME_MIN
+	rand.Seed(time.Now().UnixNano())
+	Z_TIME := rand.Intn(Z_TIME_MAX-Z_TIME_MIN) + Z_TIME_MIN
 
-        // Connect to RPC server
-        server, err := rpc.DialHTTP("tcp", "localhost:9005")
+	// Connect to RPC server
+	server, err := rpc.DialHTTP("tcp", "localhost:9005")
 
-        if err != nil {
-            fmt.Println("Server does not exist")
-            return
-        }
+	if err != nil {
+		fmt.Println("Server does not exist")
+		return
+	}
 
-        args := os.Args[1:]
+	args := os.Args[1:]
 
-        // Get ID from command line argument
-        if len(args) == 0 {
-                fmt.Println("No args given")
-                return
-        }
-        id, err := strconv.Atoi(args[0])
-        if err != nil {
-                fmt.Println("Found Error", err)
-        }
+	// Get ID from command line argument
+	if len(args) == 0 {
+		fmt.Println("No args given")
+		return
+	}
+	id, err := strconv.Atoi(args[0])
+	if err != nil {
+		fmt.Println("Found Error", err)
+	}
 
-        fmt.Println("Node", id, "will fail after", Z_TIME, "seconds")
+	fmt.Println("Node", id, "will fail after", Z_TIME, "seconds")
 
-        currTime := calcTime()
-        // Construct self
-        //leader currently starts as 1. Change later as needed.
-        self_node = shared.Node{ID: id, Hbcounter: 0, Time: currTime, Alive: true, Term: 1,
-                                Role: shared.ROLE_FOLLOWER, LeaderID: 0, Voted: false}
-        if self_node.ID == 1 {
-            self_node.Role = shared.ROLE_LEADER
-            self_node.Term = 1
-            leaderAnnouncement(server, &self_node)
+	currTime := calcTime()
+	// Construct self
+	//leader currently starts as 1. Change later as needed.
+	self_node = shared.Node{ID: id, Hbcounter: 0, Time: currTime, Alive: true, Term: 1,
+		Role: shared.ROLE_FOLLOWER, LeaderID: 0, Voted: false}
+	self_node.Store = *shared.NewKVStore() // each node owns its local KV store
+	if self_node.ID == 1 {
+		self_node.Role = shared.ROLE_LEADER
+		self_node.Term = 1
+		leaderAnnouncement(server, &self_node)
 
-        }
-        var self_node_response shared.Node // Allocate space for a response to overwrite this
+	}
+	var self_node_response shared.Node // Allocate space for a response to overwrite this
 
-        // Add node with input ID
-        if err := server.Call("Membership.Add", self_node, &self_node_response); err != nil {
-                fmt.Println("Error:2 Membership.Add()", err)
-        } else {
-                fmt.Printf("Success: Node created with id= %d\n", id)
-        }
+	// Add node with input ID
+	if err := server.Call("Membership.Add", self_node, &self_node_response); err != nil {
+		fmt.Println("Error:2 Membership.Add()", err)
+	} else {
+		fmt.Printf("Success: Node created with id= %d\n", id)
+	}
 
-        neighbors := self_node.InitializeNeighbors(id)
-        fmt.Println("Neighbors:", neighbors)
+	neighbors := self_node.InitializeNeighbors(id)
+	fmt.Println("Neighbors:", neighbors)
 
-        membership := shared.NewMembership()
-        membership.Add(self_node, &self_node)
+	membership := shared.NewMembership()
+	membership.Add(self_node, &self_node)
 
-        joinRing(server)
+	joinRing(server)
 
-        sendMessage(server, id, *membership)
+	sendMessage(server, id, *membership)
 
-        // crashTime := self_node.CrashTime()
+	// crashTime := self_node.CrashTime()
 
-        var localLog = shared.NewLog()
+	var localLog = shared.NewLog()
 
-        time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, &membership, id, localLog) })
-        time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, &membership, id, localLog) })
-//        time.AfterFunc(time.Second*time.Duration(Z_TIME), func() { runAfterZ(server, id) })   
-        time.AfterFunc(time.Second*5, func() { printLog(localLog, self_node.LeaderID, server) })
+	time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, &membership, id, localLog) })
+	time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, &membership, id, localLog) })
+	//        time.AfterFunc(time.Second*time.Duration(Z_TIME), func() { runAfterZ(server, id) })
+	time.AfterFunc(time.Second*5, func() { printLog(localLog, self_node.LeaderID, server) })
 
-        wg.Add(1)
-        wg.Wait()
+	wg.Add(1)
+	wg.Wait()
 }
 
 func runAfterX(server *rpc.Client, node *shared.Node, membership **shared.Membership, id int, log *shared.Log) {
-    //TODO
-    // HB counter increases
-    //server.Call(Node.Update??Hbcounter++)
-    fmt.Println("********************* Heartbeat *********************")
-    if node.Alive {
-        node.Hbcounter++                //Update self
-        node.Time = calcTime()
+	//TODO
+	// HB counter increases
+	//server.Call(Node.Update??Hbcounter++)
+	fmt.Println("********************* Heartbeat *********************")
+	if node.Alive {
+		node.Hbcounter++ //Update self
+		node.Time = calcTime()
 
-        (**membership).Update(*node, node) //update own membership
+		(**membership).Update(*node, node) //update own membership
 
-        updateLeader(server, node) //check for new leader information
+		updateLeader(server, node) //check for new leader information
 
-        if self_node.Role == shared.ROLE_LEADER {
-            sendLogEntries(server, fmt.Sprintf("hb-%d", node.Hbcounter), log)
-        }
+		if self_node.Role == shared.ROLE_LEADER {
+			sendLogEntries(server, fmt.Sprintf("hb-%d", node.Hbcounter), log)
+		}
 
-        time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, membership, id, log) })
-    }
+		time.AfterFunc(time.Second*X_TIME, func() { runAfterX(server, &self_node, membership, id, log) })
+	}
 }
 
 func enterElection(server *rpc.Client) {
-    self_node.Voted = false //mark as not voted
-    self_node.LeaderID = 0 //Mark as leaderless
-    self_node.Term++  //increment term
-    success := false
-    (*server).Call("Proposal.Clear", self_node.Term, &success)
+	self_node.Voted = false //mark as not voted
+	self_node.LeaderID = 0  //Mark as leaderless
+	self_node.Term++        //increment term
+	success := false
+	(*server).Call("Proposal.Clear", self_node.Term, &success)
 
-    if success { fmt.Printf("Votes cleared from Term %d\n", self_node.Term - 1) }
+	if success {
+		fmt.Printf("Votes cleared from Term %d\n", self_node.Term-1)
+	}
 
-    fmt.Printf("-------- Election - term %d --------\n", self_node.Term)
+	fmt.Printf("-------- Election - term %d --------\n", self_node.Term)
 
-    // Timeout each follower has to wait before becoming candidate
-    max_delay := 300
-    delay := rand.Intn(150) + 150 //Get number in range 150-300
-    time.Sleep(time.Duration(delay) * time.Millisecond) //Sleep random amount of time from 150 to 300
+	// Timeout each follower has to wait before becoming candidate
+	max_delay := 300
+	delay := rand.Intn(150) + 150                       //Get number in range 150-300
+	time.Sleep(time.Duration(delay) * time.Millisecond) //Sleep random amount of time from 150 to 300
 
-    proposal := shared.Node{}
-    err := (*server).Call("Proposal.Dequeue", self_node, &proposal) //Get first proposal from term
+	proposal := shared.Node{}
+	err := (*server).Call("Proposal.Dequeue", self_node, &proposal) //Get first proposal from term
 
-    if err != nil {
-        fmt.Printf("Error - updateLeader: %s\n", err)
-    }
+	if err != nil {
+		fmt.Printf("Error - updateLeader: %s\n", err)
+	}
 
-    if (proposal.ID == 0) { //No proposals yet. Proposes self as candidate
-        fmt.Println("No Proposals, proposing self as leader")
-        (*server).Call("Proposal.Enqueue", self_node, &self_node)
-        self_node.Role = shared.ROLE_CANDIDATE
-        (*server).Call("Proposal.Vote", self_node.ID, &success)
-        self_node.Voted = true
+	if proposal.ID == 0 { //No proposals yet. Proposes self as candidate
+		fmt.Println("No Proposals, proposing self as leader")
+		(*server).Call("Proposal.Enqueue", self_node, &self_node)
+		self_node.Role = shared.ROLE_CANDIDATE
+		(*server).Call("Proposal.Vote", self_node.ID, &success)
+		self_node.Voted = true
 
-        //Wait a total of 3400 ms from the beginning of the function (delay + (300 - delay) + 3100)
-        time.Sleep(time.Duration(max_delay - delay + 3100) * time.Millisecond)
-        count := 0
-        (*server).Call("Proposal.CountVotes", self_node.ID, &count)
+		//Wait a total of 3400 ms from the beginning of the function (delay + (300 - delay) + 3100)
+		time.Sleep(time.Duration(max_delay-delay+3100) * time.Millisecond)
+		count := 0
+		(*server).Call("Proposal.CountVotes", self_node.ID, &count)
 
-        if count > (MAX_NODES / 2) { //Strict majority
-            self_node.Role = shared.ROLE_LEADER
-            leaderAnnouncement(server, &self_node)
-            self_node.LeaderID = self_node.ID
-            fmt.Printf("-------- Election won by node %d with %d votes --------\n", self_node.ID, count)
-            return
-        } else {
-            fmt.Printf("Election lost with %d votes\n", count)
-            self_node.Role = shared.ROLE_FOLLOWER
-            //Wait long enough for heartbeat to occur
-            time.Sleep(time.Duration(1600) * time.Millisecond) //Wait for another 1500 ms to synch with followers
+		if count > (MAX_NODES / 2) { //Strict majority
+			self_node.Role = shared.ROLE_LEADER
+			leaderAnnouncement(server, &self_node)
+			self_node.LeaderID = self_node.ID
+			fmt.Printf("-------- Election won by node %d with %d votes --------\n", self_node.ID, count)
+			return
+		} else {
+			fmt.Printf("Election lost with %d votes\n", count)
+			self_node.Role = shared.ROLE_FOLLOWER
+			//Wait long enough for heartbeat to occur
+			time.Sleep(time.Duration(1600) * time.Millisecond) //Wait for another 1500 ms to synch with followers
 
-            if self_node.LeaderID == 0 {
-                //No election has occured (updated through heartbeat)
-                enterElection(server) //will loop forever if majority can't be found
-            }
+			if self_node.LeaderID == 0 {
+				//No election has occured (updated through heartbeat)
+				enterElection(server) //will loop forever if majority can't be found
+			}
 
-            fmt.Printf("Node %d successfully elected\n", self_node.LeaderID)
-            return
+			fmt.Printf("Node %d successfully elected\n", self_node.LeaderID)
+			return
 
+		}
+	} else {
+		(*server).Call("Proposal.Vote", proposal.ID, &success)
+		self_node.Voted = true //Has proposal for term, mark as voted
+		fmt.Printf("Voting for proposal by node %d\n", proposal.ID)
+		//Waits for a total of 1400 ms after the beginning of the function
+		time.Sleep(time.Duration(max_delay-delay+4700) * time.Millisecond) //Wait 2100-2250 ms. Total: 5000
+		if self_node.LeaderID == 0 {
+			//No election has occured (updated through heartbeat)
+			enterElection(server) //will loop forever if majority can't be found
+		}
 
-        }
-    } else {
-        (*server).Call("Proposal.Vote", proposal.ID, &success)
-        self_node.Voted = true //Has proposal for term, mark as voted
-        fmt.Printf("Voting for proposal by node %d\n", proposal.ID)
-        //Waits for a total of 1400 ms after the beginning of the function
-        time.Sleep(time.Duration(max_delay - delay + 4700) * time.Millisecond) //Wait 2100-2250 ms. Total: 5000
-        if self_node.LeaderID == 0 {
-            //No election has occured (updated through heartbeat)
-            enterElection(server) //will loop forever if majority can't be found
-        }
+		fmt.Printf("Node %d succsefully elected\n", self_node.LeaderID)
 
-        fmt.Printf("Node %d succsefully elected\n", self_node.LeaderID)
-
-    }
+	}
 }
 
 func joinRing(server *rpc.Client) {
-    ok := false
-    err := server.Call("DynamoRing.Join", self_node.ID, &ok)
+	ok := false
+	err := server.Call("DynamoRing.Join", self_node.ID, &ok)
 	if err != nil {
 		fmt.Println("Error joining ring: ", err)
 	}
-    fmt.Printf("Node %d joined the ring\n", self_node.ID)
+	fmt.Printf("Node %d joined the ring\n", self_node.ID)
 }
 func printRing(server *rpc.Client) {
 	vnodes := []shared.VNode{}
@@ -337,7 +342,7 @@ func printRing(server *rpc.Client) {
 	}
 	test_keys := []int{1, 100000, 1000000000, 1050000000, 1100000000, 1200000000, 1400000000, 1800000000, 2000000000, 2200000000}
 
-        preferenceList := [shared.N_REPLICAS]int{}
+	preferenceList := [shared.N_REPLICAS]int{}
 	for _, key := range test_keys {
 		err := server.Call("DynamoRing.GetPreferenceList", key, &preferenceList)
 		if err != nil {
@@ -347,126 +352,168 @@ func printRing(server *rpc.Client) {
 		fmt.Print(preferenceList)
 		fmt.Println()
 	}
-	
+
 }
 
-// only the leader calls this
-func put(server *rpc.Client, key int, value string) {
-    //Should get preference list and add value to each part of 
-    // preference list
+// only the leader calls this. Hash the key onto the ring, look up its
+// preference list, and send a PUT message to each replica's mailbox.
+func kvPut(server *rpc.Client, key string, value string) {
+	ringPos := shared.HashData(key)
+	var preferenceList [shared.N_REPLICAS]int
+	if err := server.Call("DynamoRing.GetPreferenceList", ringPos, &preferenceList); err != nil {
+		fmt.Println("kvPut: GetPreferenceList error:", err)
+		return
+	}
+	for _, nodeID := range preferenceList {
+		if nodeID == -1 {
+			continue // unfilled replica slot
+		}
+		msg := shared.DBMessage{ToID: nodeID, FromID: self_node.ID, Flag: shared.FLAG_PUT, Key: ringPos, Data: value}
+		ok := false
+		if err := server.Call("DBMessages.Add", msg, &ok); err != nil {
+			fmt.Printf("kvPut: send to node %d error: %s\n", nodeID, err)
+		}
+	}
+	fmt.Printf("kvPut: replicated '%s'='%s' (ring %d) to %v\n", key, value, ringPos, preferenceList)
 }
 
-//fetch data from node
-func get(server *rpc.Client, key int) {
-    // master gets key and checks preferenceList for key
-    // (preferenceList stores replica list for key ranges
-
-    //nodeN := getPrefNode(key);
-    //data = getDataNode(n, key); //sends message to node n in mailbox
-                                    //waits for n to respond
-                                    // returns result
-    //return data;
+// fetch data from a replica node.
+func kvGet(server *rpc.Client, key string) {
+	ringPos := shared.HashData(key)
+	var preferenceList [shared.N_REPLICAS]int
+	if err := server.Call("DynamoRing.GetPreferenceList", ringPos, &preferenceList); err != nil {
+		fmt.Println("kvGet: GetPreferenceList error:", err)
+		return
+	}
+	for _, nodeID := range preferenceList {
+		if nodeID == -1 {
+			continue // unfilled replica slot
+		}
+		msg := shared.DBMessage{ToID: nodeID, FromID: self_node.ID, Flag: shared.FLAG_FETCH, Key: ringPos}
+		ok := false
+		if err := server.Call("DBMessages.Add", msg, &ok); err != nil {
+			fmt.Printf("kvGet: send to node %d error: %s\n", nodeID, err)
+		}
+	}
+	fmt.Printf("kvGet: sent fetch for key '%s' (ring %d) to %v\n", key, ringPos, preferenceList)
 }
 
-
-// every node drains its mailbox each Y tick
-func processMailbox(server *rpc.Client) {
-    /*var msgs []shared.Message
-    if err := server.Call("KVStore.Listen", self_node.ID, &msgs); err != nil {
-        return
-    }
-    for _, msg := range msgs {
-        ok := false
-        server.Call("KVStore.Put", msg, &ok)
-        fmt.Printf("KV stored: '%s'='%s'\n", msg.Key, msg.Value)
-    }
-    */
+// every node drains its mailbox each Y tick and applies the messages to its
+// own local store. DBMessages.Listen returns one message at a time, so loop
+// until the mailbox is empty.
+func processKVMailbox(server *rpc.Client) {
+	for {
+		var msg shared.DBMessage
+		if err := server.Call("DBMessages.Listen", self_node.ID, &msg); err != nil {
+			return // "No messages to process" -> mailbox drained
+		}
+		switch msg.Flag {
+		case shared.FLAG_PUT:
+			ok := false
+			self_node.Store.Put(msg.Key, msg.Data, &ok)
+			fmt.Printf("node %d stored key %d = '%s'\n", self_node.ID, msg.Key, msg.Data)
+		case shared.FLAG_FETCH:
+			// TODO: read local store and reply with a FLAG_RESPONSE to sender
+            var data string 
+            if err := self_node.Store.Get(msg.Key, &data); err == nil{
+                // key found 
+                response := shared.DBMessage{ToID: msg.FromID, FromID: self_node.ID,
+                    Flag: shared.FLAG_RESPONSE, Key: msg.Key, Data: data, TaskID: msg.TaskID}
+                    ok := false
+                    if err := server.Call("DBMessages.Add", response, &ok); err != nil{
+                        fmt.Printf("FLAG_RESPONSE: send response to node %d error: %s\n", msg.FromID, err)
+                    }
+            }else{
+                fmt.Printf("node %d has no value for key %d\n", self_node.ID, msg.Key)
+            }
+		case shared.FLAG_RESPONSE:
+			// a replica answered our fetch; surface the value
+			fmt.Printf("node %d got key %d = '%s' (from node %d)\n",
+				self_node.ID, msg.Key, msg.Data, msg.FromID)
+		}
+	}
 }
 
 func runAfterY(server *rpc.Client, neighbors [2]int, membership **shared.Membership, id int, log *shared.Log) {
-    //TODO
-    // Send membership to neighbors
-    if self_node.Alive {
-        sendMessage(server, id, **membership)
-        if self_node.Role == shared.ROLE_FOLLOWER {
-            mu_lmemb.Lock()
-            (*membership) = readMessages(server, self_node.LeaderID, **membership)
-            mu_lmemb.Unlock()
-            // Do I need to check if the leader has recently updated for X time before reading the messages
-            processLogMailbox(server, log)
-            // RAFT Election: If no heartbeat from leader for Z_TIME, mark leader as dead and start election
-            node, exists := (*membership).Members[self_node.LeaderID]
-            if exists && !node.Alive {
-                node.Role = shared.ROLE_FOLLOWER
-                mu_lmemb.Lock()
-                (*membership).Members[self_node.LeaderID] = node
-                mu_lmemb.Unlock()
-                enterElection(server)
-            }
+	//TODO
+	// Send membership to neighbors
+	if self_node.Alive {
+		sendMessage(server, id, **membership)
+		if self_node.Role == shared.ROLE_FOLLOWER {
+			mu_lmemb.Lock()
+			(*membership) = readMessages(server, self_node.LeaderID, **membership)
+			mu_lmemb.Unlock()
+			// Do I need to check if the leader has recently updated for X time before reading the messages
+			processLogMailbox(server, log)
+			// RAFT Election: If no heartbeat from leader for Z_TIME, mark leader as dead and start election
+			node, exists := (*membership).Members[self_node.LeaderID]
+			if exists && !node.Alive {
+				node.Role = shared.ROLE_FOLLOWER
+				mu_lmemb.Lock()
+				(*membership).Members[self_node.LeaderID] = node
+				mu_lmemb.Unlock()
+				enterElection(server)
+			}
 
+			mu_lmemb.Lock()
+			(*membership) = readMessages(server, neighbors[0], **membership)
+			(*membership) = readMessages(server, neighbors[1], **membership)
+			mu_lmemb.Unlock()
+		} else if self_node.Role == shared.ROLE_LEADER {
+			for i := 1; i <= MAX_NODES; i++ {
+				if i != self_node.ID {
+					mu_lmemb.Lock()
+					(*membership) = readMessages(server, i, **membership)
+					mu_lmemb.Unlock()
+				}
+			}
+		}
 
-            mu_lmemb.Lock()
-            (*membership) = readMessages(server, neighbors[0], **membership)
-            (*membership) = readMessages(server, neighbors[1], **membership)
-            mu_lmemb.Unlock()
-        } else if self_node.Role == shared.ROLE_LEADER{
-            for i := 1; i <= MAX_NODES; i++ {
-                if i != self_node.ID {
-                    mu_lmemb.Lock()
-                    (*membership) = readMessages(server, i, **membership)
-                    mu_lmemb.Unlock()
-                }
-            }
-        }
-        
-        //processKVMailbox(server)
+		processKVMailbox(server)
 
-        if self_node.Role == shared.ROLE_LEADER {
-            if self_node.Hbcounter == 5 {
-        //        kvPut(server, "course", "CSC569")
-        //        kvPut(server, "project", "DynamoDB")
-        //        kvGet(server, "course")
-            } else if self_node.Hbcounter == 10 {
-        //        kvPut(server, "course", "CSC599")
-        //        kvGet(server, "course")
-            }
-        }
+		if self_node.Role == shared.ROLE_LEADER {
+			kvCycle++
+			if kvCycle%5 == 0 { // every 5 cycles (~10s) so puts keep scrolling by
+				kvPut(server, "course", "CSC569")
+				kvPut(server, "project", "DynamoDB")
+				kvGet(server, "course")
+			}
+		}
 
-        mu_lmemb.Lock()
-        printMembership(**membership)
-        mu_lmemb.Unlock()
+		mu_lmemb.Lock()
+		// printMembership(**membership)
+		mu_lmemb.Unlock()
 
-        time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, membership, id, log) })
-    }
+		time.AfterFunc(time.Second*Y_TIME, func() { runAfterY(server, neighbors, membership, id, log) })
+	}
 }
 
 func runAfterZ(server *rpc.Client, id int) {
-    //TODO
-    var node shared.Node
-    (*server).Call("Membership.Get", id, &node) //update server membership table?? unnecessary perhaps. Hopefully not harmful
-    node.Alive = false
-    (*server).Call("Membership.Update", node, &node)
-    self_node.Alive = false
+	//TODO
+	var node shared.Node
+	(*server).Call("Membership.Get", id, &node) //update server membership table?? unnecessary perhaps. Hopefully not harmful
+	node.Alive = false
+	(*server).Call("Membership.Update", node, &node)
+	self_node.Alive = false
 
-    fmt.Println("NODE " + fmt.Sprintf("%d", id) + " FAILED")
-    os.Exit(0)
+	fmt.Println("NODE " + fmt.Sprintf("%d", id) + " FAILED")
+	os.Exit(0)
 }
 
-
 func printMembership(m shared.Membership) {
-    if self_node.LeaderID > 0 {
-        fmt.Printf("Leader is node %d\n", self_node.LeaderID)
-    } else {
-        fmt.Println("NO LEADER!")
-    }
-    // caller already holds mu_lmemb, just iterate directly
-    for _, val := range m.Members {
-        status := "is Alive"
-        if !val.Alive {
-            status = "is Dead"
-        }
-        fmt.Printf("Node %d has hb %d, time %.1f and %s\n",
-            val.ID, val.Hbcounter, val.Time, status)
-    }
-    fmt.Println("")
+	if self_node.LeaderID > 0 {
+		fmt.Printf("Leader is node %d\n", self_node.LeaderID)
+	} else {
+		fmt.Println("NO LEADER!")
+	}
+	// caller already holds mu_lmemb, just iterate directly
+	for _, val := range m.Members {
+		status := "is Alive"
+		if !val.Alive {
+			status = "is Dead"
+		}
+		fmt.Printf("Node %d has hb %d, time %.1f and %s\n",
+			val.ID, val.Hbcounter, val.Time, status)
+	}
+	fmt.Println("")
 }

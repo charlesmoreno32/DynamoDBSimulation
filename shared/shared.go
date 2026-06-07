@@ -29,23 +29,22 @@ const (
 /***********************************************
  ******************** STORE ********************
  ***********************************************/
-type Store struct {
+type KVStore struct {
     Data    map[int]string // key → value
 }
 
-func NewStore() *Store {
-    return &Store{
+func NewKVStore() *KVStore {
+    return &KVStore{
         Data:    make(map[int]string),
 	}
 }
 
-
-func (st *Store) Put(key int, data string, reply *bool) error {
+func (st *KVStore) Put(key int, data string, reply *bool) error {
     st.Data[key] = data
     return nil
 }
 
-func (st *Store) Get(key int, reply *string) error {
+func (st *KVStore) Get(key int, reply *string) error {
     data, exists := st.Data[key]
 	if exists {
 		*reply = data
@@ -68,7 +67,7 @@ type Node struct {
     Role      int //Could be enum type or constants
     LeaderID  int
     Voted     bool
-	Store     Store
+	Store     KVStore
 }
 
 // Generate random crash time from 10-60 seconds
@@ -523,8 +522,9 @@ func (r *DynamoRing) getReplicaNodes(newNode VNode) [N_REPLICAS]int {
  *************** DATABASE MESSAGE ***************
  ************************************************/
 type DBMessage struct {
-	ID     int //From Node ID
-    Flag   int  //PUT, FETCH, or RESPONSE
+	ToID     int //Destination Node ID
+    FromID int //From Node ID
+    Flag   int //PUT, FETCH, or RESPONSE
     Key    int
     Data   string
     TaskID int //FETCH & RESPONSE have same ID
@@ -546,7 +546,7 @@ func NewDBMessages() *DBMessages {
 // Adds a new database message to leader's inbox (or if leader, to followers' boxes)
 func (db *DBMessages) Add(payload DBMessage, reply *bool) error {
     db.mu.Lock()
-    db.Pending[payload.ID] = append(db.Pending[payload.ID], payload) //Add to list
+    db.Pending[payload.ToID] = append(db.Pending[payload.ToID], payload) //Add to list
     *reply = true 
     db.mu.Unlock()
     return nil
@@ -607,7 +607,7 @@ func CombineTables(primary *Membership, other *Membership) *Membership {
     return primary
 }
 
-func hashData(data string) int {
+func HashData(data string) int {
     hash := md5.Sum([]byte(data))
 	key := int(binary.BigEndian.Uint32(hash[12:16]))
 	return key
